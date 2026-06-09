@@ -1,0 +1,20 @@
+name: Dreamcast build
+
+on:
+  push:
+    branches: [dreamcast, 'cursor/**']
+  pull_request:
+    branches: [dreamcast]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: einsteinx2/dcdev-kos-toolchain:gcc-9
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cross-compile gdC.elf
+        working-directory: dc
+        run: make
+      - name: Verify gdC.elf
+        run: test -f dc/gdC.elf
