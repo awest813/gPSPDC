@@ -108,7 +108,7 @@ static void test_dreamcast_ci_contract(void)
   char *workflow = read_text_file("../.github/workflows/dreamcast-build.yml");
 
   expect_contains("dreamcast CI workflow", workflow, "gdC.elf");
-  expect_contains("dreamcast CI make", workflow, "working-directory: dc");
+  expect_contains("dreamcast CI make", workflow, "-w /src/dc");
   expect_contains("dreamcast CI image", workflow,
    "einsteinx2/dcdev-kos-toolchain:gcc-9");
 
