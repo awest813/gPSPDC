@@ -2,6 +2,7 @@
 # DC porting by Troy Davis (GPF)
 
 TARGET = gdC.elf
+.DEFAULT_GOAL := all
 VPATH += .. .
 
 OBJS = sh4_stub.o sh4_helpers.o main.o cpu_threaded.o cpu.o memory.o video.o \
@@ -43,3 +44,6 @@ run: $(TARGET)
 
 dist: $(TARGET)
 	$(KOS_STRIP) $(TARGET)
+
+# Rebuild the shared register-bank switch when its implementation changes.
+cpu.o: ../cpu_mode.h

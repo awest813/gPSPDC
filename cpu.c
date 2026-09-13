@@ -19,6 +19,7 @@
 
 #include <stdio.h>
 #include "common.h"
+#include "cpu_mode.h"
 
 u32 memory_region_access_read_u8[16];
 u32 memory_region_access_read_s8[16];
@@ -4181,39 +4182,7 @@ u32 function_cc step_debug(u32 pc, u32 cycles)
 
 void set_cpu_mode(cpu_mode_type new_mode)
 {
-  u32 i;
-  cpu_mode_type cpu_mode = reg[CPU_MODE];
-
-  if(cpu_mode != new_mode)
-  {
-    if(new_mode == MODE_FIQ)
-    {
-      for(i = 8; i < 15; i++)
-      {
-        reg_mode[cpu_mode][i - 8] = reg[i];
-      }
-    }
-    else
-    {
-      reg_mode[cpu_mode][5] = reg[REG_SP];
-      reg_mode[cpu_mode][6] = reg[REG_LR];
-    }
-
-    if(cpu_mode == MODE_FIQ)
-    {
-      for(i = 8; i < 15; i++)
-      {
-        reg[i] = reg_mode[new_mode][i - 8];
-      }
-    }
-    else
-    {
-      reg[REG_SP] = reg_mode[new_mode][5];
-      reg[REG_LR] = reg_mode[new_mode][6];
-    }
-
-    reg[CPU_MODE] = new_mode;
-  }
+  cpu_switch_mode(reg, reg_mode, new_mode);
 }
 
 void raise_interrupt(irq_type irq_raised)

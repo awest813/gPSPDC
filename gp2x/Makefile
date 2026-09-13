@@ -47,3 +47,6 @@ all:	${OBJS}
 
 clean:
 	rm -f *.o ${BIN} 
+
+# Rebuild the shared register-bank switch when its implementation changes.
+cpu.o: ../cpu_mode.h
