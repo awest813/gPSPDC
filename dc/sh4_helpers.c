@@ -522,7 +522,9 @@ static u32 block_memory_reg_count(u32 reg_list)
 
 static u32 block_memory_user_bank(u32 reg_num, u32 s_bit)
 {
-  return s_bit && reg_num >= 8 && reg_num <= 14 && reg[CPU_MODE] != MODE_USER;
+  /* R8-R12 are shared with User mode except while executing in FIQ. */
+  return s_bit && reg[CPU_MODE] != MODE_USER && reg_num <= 14 &&
+   (reg_num >= 13 || (reg_num >= 8 && reg[CPU_MODE] == MODE_FIQ));
 }
 
 void function_cc execute_arm_block_memory(u32 opcode, u32 insn_pc)
@@ -532,6 +534,8 @@ void function_cc execute_arm_block_memory(u32 opcode, u32 insn_pc)
   u32 load = (opcode >> 20) & 1;
   u32 writeback = (opcode >> 21) & 1;
   u32 s_bit = (opcode >> 22) & 1;
+  u32 restore_cpsr = load && s_bit && (reg_list & 0x8000);
+  u32 user_bank = s_bit && !restore_cpsr;
   u32 up = (opcode >> 23) & 1;
   u32 pre = (opcode >> 24) & 1;
   u32 base = reg[rn];
@@ -562,14 +566,14 @@ void function_cc execute_arm_block_memory(u32 opcode, u32 insn_pc)
       {
         u32 value = execute_aligned_load32(address);
 
-        if(block_memory_user_bank(i, s_bit))
+        if(block_memory_user_bank(i, user_bank))
           reg_mode[MODE_USER][i - 8] = value;
         else
           reg[i] = value;
       }
       else
       {
-        u32 value = block_memory_user_bank(i, s_bit) ?
+        u32 value = block_memory_user_bank(i, user_bank) ?
          reg_mode[MODE_USER][i - 8] : reg[i];
 
         execute_aligned_store32(address, value);
@@ -596,7 +600,10 @@ void function_cc execute_arm_block_memory(u32 opcode, u32 insn_pc)
     {
       u32 value = execute_aligned_load32(address);
 
-      reg[REG_PC] = value;
+      /* ARMv4T LDM does not interwork from the loaded address's bit 0.
+         With S set, the restored SPSR selects the destination state. The
+         emitter uses the dual dispatcher, so return its tagged PC here. */
+      reg[REG_PC] = restore_cpsr ? execute_spsr_restore(value) : value & ~3u;
     }
     else
     {

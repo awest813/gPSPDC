@@ -44,3 +44,6 @@ run: $(TARGET)
 
 dist: $(TARGET)
 	$(KOS_STRIP) $(TARGET)
+
+# Rebuild the shared register-bank switch when its implementation changes.
+cpu.o: ../cpu_mode.h

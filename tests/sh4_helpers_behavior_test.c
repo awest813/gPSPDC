@@ -22,7 +22,24 @@ typedef int64_t s64;
 u32 reg[64], reg_mode[7][7], spsr[6], cpu_modes[32], bios_read_protect;
 u16 io_registers[3];
 u8 *memory_map_read[8192], *memory_map_write[8192];
-const u8 bit_count[256] = {0};
+const u8 bit_count[256] = {
+  0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
+  1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+  1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+  2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+  1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+  2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+  2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+  3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+  1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+  2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+  2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+  3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+  2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+  3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+  3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+  4, 5, 5, 6, 5, 6, 6, 7, 5, 6, 6, 7, 6, 7, 7, 8
+};
 u32 read_memory8(u32 address) { return 0; }
 u32 read_memory16(u32 address) { return 0; }
 u32 read_memory16_signed(u32 address) { return 0; }
@@ -30,7 +47,8 @@ u32 read_memory32(u32 address) { return 0; }
 cpu_alert_type write_memory8(u32 a, u8 v) { return CPU_ALERT_NONE; }
 cpu_alert_type write_memory16(u32 a, u16 v) { return CPU_ALERT_NONE; }
 cpu_alert_type write_memory32(u32 a, u32 v) { return CPU_ALERT_NONE; }
-void set_cpu_mode(u32 mode) { reg[CPU_MODE] = mode; }
+#include "../cpu_mode.h"
+void set_cpu_mode(u32 mode) { cpu_switch_mode(reg, reg_mode, (cpu_mode_type)mode); }
 #include "../dc/sh4_helpers.c"
 
 static unsigned failures, checks;
@@ -178,6 +196,180 @@ static void exception_return(void)
       }
 }
 
+static void mode_banks(void)
+{
+  unsigned from, to, i;
+  for(from = MODE_USER; from <= MODE_UNDEFINED; from++)
+    for(to = MODE_USER; to <= MODE_UNDEFINED; to++)
+    {
+      memset(reg, 0, sizeof(reg));
+      memset(reg_mode, 0, sizeof(reg_mode));
+      reg[CPU_MODE] = from;
+      for(i = 8; i < 13; i++)
+      {
+        reg[i] = 0x1000 + i;
+        reg_mode[MODE_USER][i - 8] = 0x2000 + i;
+        reg_mode[MODE_FIQ][i - 8] = 0x3000 + i;
+      }
+      reg[13] = 0x4000; reg[14] = 0x4001;
+      reg_mode[to][5] = 0x5000; reg_mode[to][6] = 0x5001;
+      set_cpu_mode(to);
+      for(i = 8; i < 13; i++)
+      {
+        u32 want = from == to ? 0x1000 + i :
+         to == MODE_FIQ ? 0x3000 + i :
+         from == MODE_FIQ ? 0x2000 + i : 0x1000 + i;
+        check(reg[i] == want, "mode switch R8-R12", from, to, i);
+      }
+      check(reg[CPU_MODE] == to &&
+       reg[13] == (from == to ? 0x4000 : 0x5000) &&
+       reg[14] == (from == to ? 0x4001 : 0x5001),
+       "mode switch SP/LR", from, to, 0);
+      if(from != to)
+      {
+        set_cpu_mode(from);
+        for(i = 8; i < 15; i++)
+          check(reg[i] == (i < 13 ? 0x1000 + i : 0x4000 + i - 13),
+           "mode switch round trip", from, to, i);
+      }
+    }
+}
+
+static void block_transfers(void)
+{
+  static u32 words[8192];
+  u32 up, pre, load, bank, i;
+  memory_map_read[0x02000000 >> 15] = (u8 *)words;
+  memory_map_write[0x02000000 >> 15] = (u8 *)words;
+  for(up = 0; up < 2; up++)
+    for(pre = 0; pre < 2; pre++)
+      for(load = 0; load < 2; load++)
+        for(bank = 0; bank < 2; bank++)
+        {
+          /* R8 and R12 are shared outside FIQ; R13 has a user bank. */
+          const u32 list = (1u << 8) | (1u << 12) | (1u << 13);
+          u32 start = 0x100 + (up ? (pre ? 4 : 0) : (pre ? -12 : -8));
+          u32 opcode = 0xE8000000 | (pre << 24) | (up << 23) |
+           (bank << 22) | ((!bank) << 21) | (load << 20) | list;
+          memset(words, 0, sizeof(words));
+          memset(reg, 0, sizeof(reg));
+          memset(reg_mode, 0, sizeof(reg_mode));
+          reg[CPU_MODE] = MODE_SUPERVISOR;
+          reg[0] = 0x02000100;
+          reg[8] = 0x88; reg[12] = 0xCC; reg[13] = 0xDD;
+          reg_mode[MODE_USER][0] = 0xBAD8;
+          reg_mode[MODE_USER][4] = 0xBADC;
+          reg_mode[MODE_USER][5] = 0xAA;
+          if(load)
+            for(i = 0; i < 3; i++) words[start / 4 + i] = 0x1000 + i;
+          execute_arm_block_memory(opcode, 0x08000000);
+          if(load)
+          {
+            check(reg[8] == 0x1000 && reg[12] == 0x1001 &&
+             (bank ? reg_mode[MODE_USER][5] == 0x1002 && reg[13] == 0xDD :
+              reg[13] == 0x1002), "LDM register bank", up, pre, bank);
+          }
+          else
+            check(words[start / 4] == 0x88 && words[start / 4 + 1] == 0xCC &&
+             words[start / 4 + 2] == (bank ? 0xAA : 0xDD),
+             "STM register bank", up, pre, bank);
+          check(reg[0] == (bank ? 0x02000100 :
+           up ? 0x0200010C : 0x020000F4), "block writeback", up, pre, bank);
+        }
+  for(up = 0; up < 2; up++)
+    for(pre = 0; pre < 2; pre++)
+      for(bank = 0; bank < 2; bank++)
+        for(i = 0; i < 4; i++)
+        {
+          /* LDM with PC: S=0 stays ARM; S=1 restores CPSR and current bank. */
+          u32 start = 0x100 + (up ? (pre ? 4 : 0) : (pre ? -12 : -8));
+          u32 thumb = i & 1;
+          u32 target = 0x08000100 | i;
+          u32 expected = bank ? (target & (thumb ? ~1u : ~3u)) | thumb :
+           target & ~3u;
+          u32 opcode = 0xE830C100 | (pre << 24) | (up << 23) | (bank << 22);
+          memset(reg, 0, sizeof(reg));
+          memset(io_registers, 0, sizeof(io_registers));
+          reg[CPU_MODE] = MODE_SUPERVISOR;
+          reg[REG_CPSR] = 0x93;
+          cpu_modes[0x13] = MODE_SUPERVISOR;
+          spsr[MODE_SUPERVISOR] = 0xA0000013 | (thumb << 5);
+          reg[0] = 0x02000100;
+          words[start / 4] = 0x1234;
+          words[start / 4 + 1] = 0x5678;
+          words[start / 4 + 2] = target;
+          execute_arm_block_memory(opcode, 0x08000000);
+          check(reg[REG_PC] == expected && reg[8] == 0x1234 && reg[14] == 0x5678 &&
+           reg[REG_CPSR] == (bank ? spsr[MODE_SUPERVISOR] : 0x93),
+           "LDM PC/exception return", up, pre, bank);
+          check(reg[0] == (up ? 0x0200010C : 0x020000F4),
+           "LDM PC writeback", up, pre, bank);
+        }
+}
+
+static void fiq_and_ldm_returns(void)
+{
+  static u32 words[8192];
+  u32 i, thumb, irq;
+  memory_map_read[0x02000000 >> 15] = (u8 *)words;
+  memory_map_write[0x02000000 >> 15] = (u8 *)words;
+  memset(reg, 0, sizeof(reg));
+  memset(reg_mode, 0, sizeof(reg_mode));
+  reg[CPU_MODE] = MODE_IRQ;
+  reg[0] = 0x02000100;
+  for(i = 8; i < 13; i++)
+  {
+    reg[i] = 0x1000 + i;
+    reg_mode[MODE_FIQ][i - 8] = 0x2000 + i;
+  }
+  reg_mode[MODE_USER][5] = 0x7000;
+  reg_mode[MODE_USER][6] = 0x7001;
+  set_cpu_mode(MODE_FIQ);
+  execute_arm_block_memory(0xE8C07F00, 0x08000000); /* STMIA R0,{R8-R14}^ */
+  for(i = 0; i < 7; i++)
+  {
+    check(words[64 + i] == (i < 5 ? 0x1008 + i : 0x7000 + i - 5),
+     "FIQ stores shared user bank", i, 0, 0);
+    words[64 + i] = 0x8000 + i;
+  }
+  execute_arm_block_memory(0xE8D07F00, 0x08000000); /* LDMIA R0,{R8-R14}^ */
+  for(i = 8; i < 13; i++)
+    check(reg[i] == 0x2000 + i, "FIQ load preserves FIQ bank", i, 0, 0);
+  check(reg_mode[MODE_USER][5] == 0x8005 && reg_mode[MODE_USER][6] == 0x8006,
+   "FIQ user SP/LR loads", 0, 0, 0);
+  set_cpu_mode(MODE_IRQ);
+  for(i = 8; i < 13; i++)
+    check(reg[i] == 0x8000 + i - 8, "FIQ return restores updated shared bank", i, 0, 0);
+
+  for(thumb = 0; thumb < 2; thumb++)
+    for(irq = 0; irq < 2; irq++)
+    {
+      u32 restored = 0xA0000010 | (thumb << 5);
+      memset(reg, 0, sizeof(reg));
+      memset(reg_mode, 0, sizeof(reg_mode));
+      reg[CPU_MODE] = MODE_SUPERVISOR;
+      reg[REG_CPSR] = 0x93;
+      reg[REG_SP] = 0x02000100;
+      reg_mode[MODE_USER][5] = 0x02001000;
+      reg_mode[MODE_USER][6] = 0xABCD;
+      cpu_modes[0x10] = MODE_USER;
+      spsr[MODE_SUPERVISOR] = restored;
+      words[64] = 0x1234; words[65] = 0x5678; words[66] = 0x08000203;
+      io_registers[REG_IE] = io_registers[REG_IF] = io_registers[REG_IME] = irq;
+      execute_arm_block_memory(0xE8FDC001, 0x08000000);
+      check(reg_mode[MODE_SUPERVISOR][5] == 0x0200010C &&
+       reg_mode[MODE_SUPERVISOR][6] == 0x5678 && reg[0] == 0x1234 &&
+       reg_mode[MODE_USER][5] == 0x02001000 && reg_mode[MODE_USER][6] == 0xABCD,
+       "LDM return writes old bank before switching", thumb, irq, 0);
+      check(reg[CPU_MODE] == (irq ? MODE_IRQ : MODE_USER) &&
+       reg[REG_PC] == (irq ? 0x18 : thumb ? 0x08000203 : 0x08000200) &&
+       (irq ? spsr[MODE_IRQ] == restored &&
+        reg_mode[MODE_IRQ][6] == (thumb ? 0x08000206 : 0x08000204) :
+        reg[REG_CPSR] == restored && reg[REG_SP] == 0x02001000 && reg[REG_LR] == 0xABCD),
+       "LDM return state/IRQ", thumb, irq, 0);
+    }
+}
+
 int main(void)
 {
   static const u32 edge[] = {0, 1, 0x7fffffff, 0x80000000,
@@ -200,6 +392,9 @@ int main(void)
   }
   cpsr_masked_write();
   exception_return();
+  block_transfers();
+  mode_banks();
+  fiq_and_ldm_returns();
   printf("SH-4 helpers: %u checks, %u failures\n", checks, failures);
   return failures != 0;
 }

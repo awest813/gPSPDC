@@ -31,3 +31,6 @@ LIBS            += ${shell ${PREFIX}/bin/sdl-config --libs} -lpsppower \
 
 include ${PSPSDK}/lib/build.mak
 
+
+# Rebuild the shared register-bank switch when its implementation changes.
+cpu.o: ../cpu_mode.h

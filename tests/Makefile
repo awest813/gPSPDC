@@ -68,5 +68,5 @@ clean:
 		phase8_dreamcast_polish_test phase9_stability_test \
 		phase10_external_validation_test
 
-sh4_helpers_behavior_test: sh4_helpers_behavior_test.c ../dc/sh4_helpers.c ../cpu.h shims/kos.h
+sh4_helpers_behavior_test: sh4_helpers_behavior_test.c ../dc/sh4_helpers.c ../cpu.h ../cpu_mode.h shims/kos.h
 	$(CC) $(CFLAGS) -Ishims -I.. -o $@ $<
