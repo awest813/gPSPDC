@@ -47,6 +47,7 @@ needs a failing test to justify divergence.
 | B7 | `SH4_ARM_MAX_EMIT_BYTES_PER_INSN` (512) is an estimate; the patch-time backstop calls `gpsp_dynarec_fatal_error` if it is ever wrong | open | If the fatal error is ever observed, measure the real worst-case emission and raise the bound (or always use the far skip) |
 | B8 | `SH4_EMIT_LOAD_IMM` materializes 32-bit constants in up to 14 instructions | open | Perf, not correctness: a PC-relative literal pool would shrink hot blocks substantially (every helper call embeds a function address). Largest remaining dynarec speed lever |
 | B9 | Block-level register allocation (gpSP "memory form" only on SH-4) | open | Every ARM register access is a load/store through r12. Big perf project; only attempt after A-track baselining shows it is needed |
+| B10 | Grand Theft Auto Advance stops with `bad jump 1a3019f6` (performance plan F13) | open | Deterministic. Control reaches data (`SWI 0xEF0000`) on the IWRAM stack, so the BIOS SWI dispatcher indexes past its table. The jump into the stack is not yet identified; see [the investigation log](GTA_BAD_JUMP_LOG_2026-09-13.md) |
 
 ## Track C — Test infrastructure
 
