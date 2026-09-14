@@ -134,7 +134,14 @@ void function_cc execute_store_u8_no_smc(u32 address, u32 source);
 void function_cc execute_store_u16_no_smc(u32 address, u32 source);
 void function_cc execute_store_u32_no_smc(u32 address, u32 source);
 u32 function_cc execute_arm_translate(u32 cycles);
+#if defined(_arch_dreamcast)
+/* cycles is the live SH-4 cycle counter, so a store that overwrites
+   translated code can resume through the dispatcher. */
+void function_cc execute_arm_block_memory(u32 opcode, u32 insn_pc,
+ u32 cycles);
+#else
 void function_cc execute_arm_block_memory(u32 opcode, u32 insn_pc);
+#endif
 void init_translater();
 void cpu_write_mem_savestate(file_tag_type savestate_file);
 void cpu_read_savestate(file_tag_type savestate_file);

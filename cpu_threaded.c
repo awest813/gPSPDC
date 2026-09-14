@@ -114,6 +114,37 @@ u32 allow_smc_ram_u8 = 1;
 u32 allow_smc_ram_u16 = 1;
 u32 allow_smc_ram_u32 = 1;
 
+/* Recent translations, recorded once per translated block (never on the
+   execution path), so a fatal dispatch can name the guest block whose
+   emitted code jumped to a bad address. */
+#define TRANSLATION_HISTORY_SIZE 64
+
+typedef struct
+{
+  u32 start_pc;
+  u32 end_pc;
+  u8 *code_start;
+  u8 *code_end;
+  u32 thumb;
+} translation_history_type;
+
+static translation_history_type translation_history[TRANSLATION_HISTORY_SIZE];
+static u32 translation_history_count = 0;
+
+static void translation_history_record(u32 start_pc, u32 end_pc,
+ u8 *code_start, u8 *code_end, u32 thumb)
+{
+  translation_history_type *entry = translation_history +
+   (translation_history_count % TRANSLATION_HISTORY_SIZE);
+
+  entry->start_pc = start_pc;
+  entry->end_pc = end_pc;
+  entry->code_start = code_start;
+  entry->code_end = code_end;
+  entry->thumb = thumb;
+  translation_history_count++;
+}
+
 typedef struct
 {
   u8 *block_offset;
@@ -2769,10 +2800,11 @@ u32 bios_block_tag_top = 0x0101;
 
 #ifdef _arch_dreamcast
 #define dynarec_retry_fatal(buffer) gpsp_dynarec_fatal_error(buffer)
-#define dynarec_bad_jump_fatal(buffer) gpsp_dynarec_fatal_error(buffer)
+#define dynarec_bad_jump_fatal(buffer, lookup_type, requested_pc)             \
+  dynarec_bad_jump_report(lookup_type, requested_pc)
 #else
 #define dynarec_retry_fatal(buffer) ((void)(buffer))
-#define dynarec_bad_jump_fatal(buffer) do {                                   \
+#define dynarec_bad_jump_fatal(buffer, lookup_type, requested_pc) do {        \
   print_string(buffer, 0, 0, 0xFFFF, 0x0000);                                 \
   update_screen();                                                            \
   delay_us(5000000);                                                          \
@@ -2786,6 +2818,9 @@ u32 bios_block_tag_top = 0x0101;
   {                                                                           \
     __label__ redo;                                                           \
     s32 translation_result;                                                   \
+                                                                              \
+    if(translation_recursion_level == 0)                                      \
+      translation_flush_begin();                                              \
                                                                               \
     redo:                                                                     \
     translation_redo_attempts++;                                              \
@@ -2821,8 +2856,7 @@ u32 bios_block_tag_top = 0x0101;
     if(translation_recursion_level == 0)                                      \
     {                                                                         \
       translation_redo_attempts = 0;                                          \
-      translate_invalidate_dcache_region(mem_type##_translation_cache,        \
-       mem_type##_translation_ptr);                                           \
+      translation_flush_new_code();                                           \
     }                                                                         \
   }                                                                           \
   else                                                                        \
@@ -2834,12 +2868,182 @@ u32 translation_recursion_level = 0;
 u32 translation_flush_count = 0;
 u32 translation_redo_attempts = 0;
 
+#ifdef _arch_dreamcast
+extern u8 *sh4_dispatch_return;
+extern u32 flush_ram_count;
+
+static translation_history_type *translation_history_find(u8 *host_address)
+{
+  u32 available = translation_history_count;
+  u32 i;
+
+  if(available > TRANSLATION_HISTORY_SIZE)
+    available = TRANSLATION_HISTORY_SIZE;
+
+  /* Newest first: after a cache flush the same host range is reused. A
+     call's return address may equal the block's end when the call is the
+     last thing emitted. */
+  for(i = 1; i <= available; i++)
+  {
+    translation_history_type *entry = translation_history +
+     ((translation_history_count - i) % TRANSLATION_HISTORY_SIZE);
+
+    if((host_address > entry->code_start) && (host_address <= entry->code_end))
+      return entry;
+  }
+
+  return NULL;
+}
+
+/* Serial output is not reliably visible (Flycast shows it in a separate
+   window, hardware needs a cable), so everything needed to diagnose the
+   jump goes on the fatal screen, which holds about 22 lines of 50
+   characters: the source block, registers, the tail of the source block's
+   guest code, the emitted code before the dispatch call, and the most
+   recent translations. */
+static void dynarec_bad_jump_report(const char *lookup_type, u32 requested_pc)
+{
+  char buffer[1536];
+  u8 *source = sh4_dispatch_return;
+  translation_history_type *entry = NULL;
+  u32 length;
+  u32 i;
+
+  if(source != NULL)
+    entry = translation_history_find(source);
+
+  length = sprintf(buffer, "bad jump %08x (%s lookup)\n", requested_pc,
+   lookup_type);
+
+  if(entry != NULL)
+  {
+    length += sprintf(buffer + length, "from %s block %08x-%08x +%x\n",
+     entry->thumb ? "thumb" : "arm", entry->start_pc, entry->end_pc,
+     (u32)(source - entry->code_start));
+  }
+  else if(source != NULL)
+  {
+    length += sprintf(buffer + length, "from host %08x, block unknown\n",
+     (u32)source);
+  }
+  else
+  {
+    length += sprintf(buffer + length, "from C dispatch, pc reg %08x\n",
+     reg[REG_PC]);
+  }
+
+  for(i = 0; i < 16; i += 4)
+  {
+    length += sprintf(buffer + length, "r%-2u %08x %08x %08x %08x\n", i,
+     reg[i], reg[i + 1], reg[i + 2], reg[i + 3]);
+  }
+
+  length += sprintf(buffer + length,
+   "cpsr %02x nzcv %u%u%u%u spsr %08x rf %u\n", reg[REG_CPSR] & 0xFF,
+   reg[REG_N_FLAG], reg[REG_Z_FLAG], reg[REG_C_FLAG], reg[REG_V_FLAG],
+   spsr[reg[CPU_MODE]], flush_ram_count);
+
+  {
+    /* A jump through the BIOS SWI table lands here when the dispatcher read
+       the wrong SWI number from [LR_svc - 2]; the BIOS pushed SPSR, r11,
+       r12 and LR_svc on the supervisor stack before the lookup. */
+    u32 in_svc = (reg[CPU_MODE] == MODE_SUPERVISOR);
+    u32 svc_sp = in_svc ? reg[REG_SP] : reg_mode[MODE_SUPERVISOR][5];
+    u32 svc_lr = in_svc ? reg[REG_LR] : reg_mode[MODE_SUPERVISOR][6];
+
+    length += sprintf(buffer + length, "mode %u svc sp %08x lr %08x\n",
+     reg[CPU_MODE], svc_sp, svc_lr);
+    length += sprintf(buffer + length, "svc stk %08x %08x %08x %08x\n",
+     read_memory32(svc_sp), read_memory32(svc_sp + 4),
+     read_memory32(svc_sp + 8), read_memory32(svc_sp + 12));
+    length += sprintf(buffer + length, "@lr-4 %08x %08x\n",
+     read_memory32((svc_lr & ~3) - 4), read_memory32(svc_lr & ~3));
+  }
+
+  if(translation_history_count > 0)
+  {
+    translation_history_type *newest = translation_history +
+     ((translation_history_count - 1) % TRANSLATION_HISTORY_SIZE);
+
+    length += sprintf(buffer + length, "newest %08x: %08x %08x\n",
+     newest->start_pc, read_memory32(newest->start_pc & ~3),
+     read_memory32((newest->start_pc & ~3) + 4));
+  }
+
+  if(entry != NULL)
+  {
+    /* Indirect branches usually sit at or near the end of their block. */
+    u32 width = entry->thumb ? 2 : 4;
+    u32 per_line = entry->thumb ? 8 : 4;
+    u32 shown = per_line * 4;
+    u32 address = entry->start_pc;
+    u32 column = 0;
+
+    if(((entry->end_pc - entry->start_pc) / width) > shown)
+      address = entry->end_pc - (shown * width);
+
+    while(address < entry->end_pc)
+    {
+      if(column == 0)
+        length += sprintf(buffer + length, "%08x:", address);
+
+      if(entry->thumb)
+        length += sprintf(buffer + length, " %04x", read_memory16(address));
+      else
+        length += sprintf(buffer + length, " %08x", read_memory32(address));
+
+      address += width;
+      column++;
+
+      if((column == per_line) || (address >= entry->end_pc))
+      {
+        length += sprintf(buffer + length, "\n");
+        column = 0;
+      }
+    }
+  }
+
+  if(source != NULL)
+  {
+    u16 *words = (u16 *)((u32)source & ~1);
+    u32 count = 24;
+
+    if((entry != NULL) && ((u32)(words - (u16 *)entry->code_start) < count))
+      count = (u32)(words - (u16 *)entry->code_start);
+
+    for(i = count; i > 0; i--)
+    {
+      length += sprintf(buffer + length, "%04x%c", words[-(s32)i],
+       (((i - 1) % 8) == 0) ? '\n' : ' ');
+    }
+  }
+
+  for(i = (translation_history_count > 4) ? 4 : translation_history_count;
+   i > 0; i--)
+  {
+    translation_history_type *recent = translation_history +
+     ((translation_history_count - i) % TRANSLATION_HISTORY_SIZE);
+
+    length += sprintf(buffer + length, "%s %08x-%08x%c",
+     recent->thumb ? "T" : "A", recent->start_pc, recent->end_pc,
+     ((i % 2) == 1) ? '\n' : ' ');
+  }
+
+  if((length > 0) && (buffer[length - 1] == '\n'))
+    buffer[--length] = 0;
+
+  printf("%s\n", buffer);
+  gpsp_dynarec_fatal_error(buffer);
+}
+#endif
+
 #define block_lookup_address_builder(type)                                    \
 u8 function_cc *block_lookup_address_##type(u32 pc)                           \
 {                                                                             \
   u16 *location;                                                              \
   u32 block_tag;                                                              \
   u8 *block_address;                                                          \
+  u32 requested_pc = pc;                                                      \
                                                                               \
   /* Starting at the beginning, we allow for one translation cache flush. */  \
   if(translation_recursion_level == 0)                                        \
@@ -2886,13 +3090,18 @@ u8 function_cc *block_lookup_address_##type(u32 pc)                           \
       {                                                                       \
         __label__ redo;                                                       \
         s32 translation_result;                                               \
+        u8 *hash_entry;                                                       \
+                                                                              \
+        if(translation_recursion_level == 0)                                  \
+          translation_flush_begin();                                          \
                                                                               \
         redo:                                                                 \
                                                                               \
         translation_recursion_level++;                                        \
-        ((u32 *)rom_translation_ptr)[0] = pc;                                 \
-        ((u32 **)rom_translation_ptr)[1] = NULL;                              \
-        *block_ptr_address = (u32 *)rom_translation_ptr;                      \
+        hash_entry = rom_translation_ptr;                                     \
+        ((u32 *)hash_entry)[0] = pc;                                          \
+        ((u32 **)hash_entry)[1] = NULL;                                       \
+        *block_ptr_address = (u32 *)hash_entry;                               \
         rom_translation_ptr += 8;                                             \
         block_address = rom_translation_ptr + block_prologue_size;            \
         block_lookup_translate_##type(rom, 0);                                \
@@ -2904,12 +3113,19 @@ u8 function_cc *block_lookup_address_##type(u32 pc)                           \
           if(translation_recursion_level)                                     \
             return NULL;                                                      \
                                                                               \
+          /* A ROM cache flush cleared the hash table, and the chain link     \
+             this entry hung from may lie in the discarded cache. Rehang      \
+             from the (now empty) bucket so the retried block is findable.    \
+             Without a flush the link is intact and the retry replaces the    \
+             partial block. */                                                \
+          if(rom_translation_ptr <= hash_entry)                               \
+            block_ptr_address = rom_branch_hash + hash_target;                \
+                                                                              \
           goto redo;                                                          \
         }                                                                     \
                                                                               \
         if(translation_recursion_level == 0)                                  \
-          translate_invalidate_dcache_region(rom_translation_cache,           \
-           rom_translation_ptr);                                              \
+          translation_flush_new_code();                                       \
       }                                                                       \
       break;                                                                  \
     }                                                                         \
@@ -2922,7 +3138,7 @@ u8 function_cc *block_lookup_address_##type(u32 pc)                           \
         sprintf(buffer, "bad jump %x (%x) (%x)", pc, reg[REG_PC],             \
          last_instruction);                                                   \
         printf("%s\n", buffer);                                               \
-        dynarec_bad_jump_fatal(buffer);                                       \
+        dynarec_bad_jump_fatal(buffer, #type, requested_pc);                  \
       }                                                                       \
       block_address = (u8 *)(-1);                                             \
       break;                                                                  \
@@ -2930,6 +3146,50 @@ u8 function_cc *block_lookup_address_##type(u32 pc)                           \
                                                                               \
   return block_address;                                                       \
 }                                                                             \
+
+/* Translation-cache write pointers when the current top-level translation
+   began. Only code emitted after them needs its instruction and operand
+   cache lines flushed; flushing every used byte after each new block made
+   translation cost grow with how full the caches were. A cache flush during
+   translation resets its region, after which the whole region is new. */
+#define TRANSLATION_FLUSHED_RAM  0x01
+#define TRANSLATION_FLUSHED_ROM  0x02
+#define TRANSLATION_FLUSHED_BIOS 0x04
+
+static u8 *ram_translation_flush_start;
+static u8 *rom_translation_flush_start;
+static u8 *bios_translation_flush_start;
+static u32 translation_regions_flushed = 0;
+
+static void translation_flush_begin(void)
+{
+  ram_translation_flush_start = ram_translation_ptr;
+  rom_translation_flush_start = rom_translation_ptr;
+  bios_translation_flush_start = bios_translation_ptr;
+  translation_regions_flushed = 0;
+}
+
+#define translation_flush_new_region(mem_type, flushed_bit)                   \
+  do                                                                          \
+  {                                                                           \
+    u8 *start = mem_type##_translation_flush_start;                           \
+                                                                              \
+    if(translation_regions_flushed & flushed_bit)                             \
+      start = mem_type##_translation_cache;                                   \
+                                                                              \
+    if(mem_type##_translation_ptr > start)                                    \
+      translate_invalidate_dcache_region(start, mem_type##_translation_ptr);  \
+    (void)start;                                                              \
+  } while(0)
+
+/* Recursive translations can write to every region, and block linking only
+   patches code inside the ranges written since translation_flush_begin. */
+static void translation_flush_new_code(void)
+{
+  translation_flush_new_region(ram, TRANSLATION_FLUSHED_RAM);
+  translation_flush_new_region(rom, TRANSLATION_FLUSHED_ROM);
+  translation_flush_new_region(bios, TRANSLATION_FLUSHED_BIOS);
+}
 
 block_lookup_address_builder(arm);
 block_lookup_address_builder(thumb);
@@ -3278,6 +3538,7 @@ s32 translate_block_##type(u32 pc, translation_region_type                    \
   u8 *backpatch_address;                                                      \
   translation_ptr_t translation_ptr;                                          \
   translation_ptr_t translation_cache_limit;                                  \
+  u8 *block_code_start;                                                       \
   s32 i;                                                                      \
   u32 flag_status;                                                            \
   external_block_exit_type external_block_exits[MAX_EXITS];                   \
@@ -3323,6 +3584,7 @@ s32 translate_block_##type(u32 pc, translation_region_type                    \
       break;                                                                  \
   }                                                                           \
                                                                               \
+  block_code_start = (u8 *)translation_ptr;                                   \
   generate_block_prologue();                                                  \
                                                                               \
   /* This is a function because it's used a lot more than it might seem (all  \
@@ -3474,6 +3736,9 @@ s32 translate_block_##type(u32 pc, translation_region_type                    \
       break;                                                                  \
   }                                                                           \
                                                                               \
+  translation_history_record(block_start_pc, block_end_pc, block_code_start,  \
+   (u8 *)translation_ptr, type##_instruction_width == 2);                     \
+                                                                              \
   for(i = 0; i < external_block_exit_position; i++)                           \
   {                                                                           \
     branch_target = external_block_exits[i].branch_target;                    \
@@ -3490,9 +3755,17 @@ s32 translate_block_##type(u32 pc, translation_region_type                    \
 translate_block_builder(arm);
 translate_block_builder(thumb);
 
+#ifdef _arch_dreamcast
+extern u32 sh4_block_store_smc_pending;
+#endif
+
 void flush_translation_cache_ram()
 {
   flush_ram_count++;
+#ifdef _arch_dreamcast
+  /* A flush makes any pending block-store SMC alert moot. */
+  sh4_block_store_smc_pending = 0;
+#endif
 /*  printf("ram flush %d (pc %x), %x to %x, %x to %x\n",
    flush_ram_count, reg[REG_PC], iwram_code_min, iwram_code_max,
    ewram_code_min, ewram_code_max); */
@@ -3504,6 +3777,7 @@ void flush_translation_cache_ram()
 sh4_invalidate_icache_region((u32)ram_translation_cache,
   (ram_translation_ptr - ram_translation_cache) + 0x100);
 #endif
+  translation_regions_flushed |= TRANSLATION_FLUSHED_RAM;
   ram_translation_ptr = ram_translation_cache;
   ram_block_tag_top = 0x0101;
   if(iwram_code_min != 0xFFFFFFFF)
@@ -3570,6 +3844,7 @@ void flush_translation_cache_rom()
 sh4_invalidate_icache_region((u32)rom_translation_cache,
 rom_translation_ptr - rom_translation_cache + 0x100);
 #endif
+  translation_regions_flushed |= TRANSLATION_FLUSHED_ROM;
   rom_translation_ptr = rom_translation_cache;
   memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
 }
@@ -3583,6 +3858,7 @@ void flush_translation_cache_bios()
    sh4_invalidate_icache_region((u32)bios_translation_cache,
    bios_translation_ptr - bios_translation_cache + 0x100);
 #endif
+  translation_regions_flushed |= TRANSLATION_FLUSHED_BIOS;
   bios_block_tag_top = 0x0101;
   bios_translation_ptr = bios_translation_cache;
   memset(bios_rom + 0x4000, 0, 0x4000);

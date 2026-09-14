@@ -132,7 +132,7 @@ static void test_sh4_stub_async_exit_contract(void)
   expect_contains("dispatch cycles pinned off r12/r13/r15", text,
    "register u32 dispatch_cycles asm(\"r3\")");
   expect_count("dispatch lookup call sites", text, "sh4_lookup_pc(cycles);",
-   13);
+   15);
   expect_count("update_gba cycle capture", text, "cycles = update_gba();",
    4);
   expect_count("irq alert dispatches without update_gba", text,
@@ -311,10 +311,20 @@ static void test_translation_cache_invalidation_contract(void)
   if(text == NULL)
     return;
 
-  expect_contains("RAM/BIOS cache invalidation hook", text,
-   "translate_invalidate_dcache_region(mem_type##_translation_cache,");
-  expect_contains("ROM cache invalidation hook", text,
-   "translate_invalidate_dcache_region(rom_translation_cache,");
+  /* Each top-level translation flushes only the code emitted since it
+     began, in every region, instead of each region's whole used range. */
+  expect_count("no whole-range RAM/BIOS flush per block", text,
+   "translate_invalidate_dcache_region(mem_type##_translation_cache,", 0);
+  expect_count("no whole-range ROM flush per block", text,
+   "translate_invalidate_dcache_region(rom_translation_cache,", 0);
+  expect_count("flush start captured before RAM/BIOS and ROM translation",
+   text, "translation_flush_begin();", 2);
+  expect_count("new code flushed after RAM/BIOS and ROM translation", text,
+   "translation_flush_new_code();", 2);
+  expect_contains("new-range flush hook", text,
+   "translate_invalidate_dcache_region(start, mem_type##_translation_ptr);");
+  expect_count("flushes mark their region", text,
+   "translation_regions_flushed |= TRANSLATION_FLUSHED_", 3);
   expect_count("old zero-arg invalidation hook", text,
    "translate_invalidate_dcache();", 0);
 

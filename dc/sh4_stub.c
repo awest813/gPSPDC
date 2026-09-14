@@ -23,6 +23,7 @@ extern cpu_alert_type write_memory32(u32 address, u32 value);
 extern void flush_translation_cache_ram();
 extern u32 step_debug(u32 pc, u32 cycles);
 extern void gpsp_dynarec_fatal_error(const char *detail);
+extern u32 sh4_block_store_smc_pending;
 
 #if defined(_arch_dreamcast) && defined(GPSP_DC_RUNTIME_TRACE)
 static u32 sh4_trace_y = 396;
@@ -99,6 +100,11 @@ static inline void extract_flags_local(void)
    overflows mid-game. */
 static u32 sh4_dispatch_stack;
 
+/* Host return address of the translated-code call that entered the latest
+   dispatch, or NULL when C code (update_gba, SMC and IRQ alerts) requested
+   it. Read only by the bad-jump report in cpu_threaded.c. */
+u8 *sh4_dispatch_return;
+
 static void __attribute__((noreturn, noinline))
  sh4_dispatch_block(u8 *target, u32 cycles)
 {
@@ -130,6 +136,7 @@ static void __attribute__((noreturn)) sh4_lookup_pc(u32 cycles)
   u8 *target;
 
   reg[CHANGED_PC_STATUS] = 0;
+  sh4_dispatch_return = NULL;
 
   if(reg[REG_CPSR] & 0x20)
     target = block_lookup_address_thumb(pc);
@@ -166,6 +173,15 @@ u32 sh4_update_gba(u32 pc)
   }
 #endif
 
+  /* Thumb block transfers that end without a checked store (PUSH with LR,
+     POP with PC) can leave an SMC alert pending. reg[REG_PC] holds the next
+     instruction to execute, so flushing and dispatching there is safe. */
+  if(sh4_block_store_smc_pending)
+  {
+    flush_translation_cache_ram();
+    sh4_lookup_pc(cycles);
+  }
+
   if(reg[CHANGED_PC_STATUS] != 0)
     sh4_lookup_pc(cycles);
 
@@ -174,17 +190,30 @@ u32 sh4_update_gba(u32 pc)
 
 void sh4_indirect_branch_arm(u32 address, u32 cycles)
 {
+  sh4_dispatch_return = __builtin_return_address(0);
   sh4_dispatch_block(block_lookup_address_arm(address), cycles);
 }
 
 void sh4_indirect_branch_thumb(u32 address, u32 cycles)
 {
+  sh4_dispatch_return = __builtin_return_address(0);
   sh4_dispatch_block(block_lookup_address_thumb(address), cycles);
 }
 
 void sh4_indirect_branch_dual(u32 address, u32 cycles)
 {
+  sh4_dispatch_return = __builtin_return_address(0);
   sh4_dispatch_block(block_lookup_address_dual(address), cycles);
+}
+
+/* A block transfer overwrote translated RAM code. The emitted code that
+   called the store may have been flushed with it, so resume at the next
+   instruction through the dispatcher instead of returning. */
+void sh4_block_store_smc(u32 next_pc, u32 cycles)
+{
+  reg[REG_PC] = next_pc;
+  flush_translation_cache_ram();
+  sh4_lookup_pc(cycles);
 }
 
 void function_cc execute_store_u8(u32 address, u32 value, u32 pc, u32 cycles)
@@ -321,7 +350,9 @@ void function_cc execute_store_u32(u32 address, u32 value, u32 pc, u32 cycles)
       u32 offset = address & 0x7FFF;
       *(u32 *)(map + offset) = value;
 
-      if(*(u32 *)(map + offset - 32768) != 0)
+      /* Also honor an SMC hit by the earlier stores of a Thumb block
+         transfer, which finishes with this store. */
+      if((*(u32 *)(map + offset - 32768) | sh4_block_store_smc_pending) != 0)
       {
         flush_translation_cache_ram();
         sh4_lookup_pc(cycles);

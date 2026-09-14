@@ -342,12 +342,25 @@ void gpsp_dynarec_fatal_error(const char *detail)
 {
   static const char *prefix = "Dynarec translation failed:";
   static const char *suffix = "Press Start to exit.";
-  const char *lines[3];
+  char text[1536];
+  char *cursor = text;
+  const char *lines[24];
+  u32 line_count = 0;
 
-  lines[0] = prefix;
-  lines[1] = detail;
-  lines[2] = suffix;
-  gpsp_fatal_error_screen(lines, 3);
+  /* Detail may span several newline-separated lines (register dumps). */
+  snprintf(text, sizeof(text), "%s", detail ? detail : "");
+  lines[line_count++] = prefix;
+
+  while((cursor != NULL) && (line_count < 23))
+  {
+    lines[line_count++] = cursor;
+    cursor = strchr(cursor, '\n');
+    if(cursor != NULL)
+      *cursor++ = 0;
+  }
+
+  lines[line_count++] = suffix;
+  gpsp_fatal_error_screen(lines, line_count);
 }
 
 static s32 gpsp_load_autoload_filename(u8 *load_filename,
@@ -916,9 +929,14 @@ void synchronize()
   if(synchronize_flag == 0)
     print_string("--FF--", 0xFFFF, 0x000, 0, 0);
 
+#ifndef _arch_dreamcast
+  /* The Dreamcast has no window caption; skip the per-frame float format. */
   sprintf(char_buffer, "gpSP: %.1fms %.1ffps", us_needed / 1000.0,
    1000000.0 / us_needed);
   SDL_WM_SetCaption(char_buffer, "gpSP");
+#else
+  (void)char_buffer;
+#endif
 
 /*
     sprintf(char_buffer, "%02d %02d %06d %07d", frameskip, (u32)ms_needed,

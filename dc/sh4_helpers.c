@@ -306,14 +306,30 @@ u32 function_cc execute_aligned_load32(u32 address)
   else
     return read_memory32(address);
 }
+/* Set when a store overwrites translated RAM code in a context that cannot
+   dispatch on its own (the stores inside block transfers). Consumed by the
+   ARM block-transfer helper, the final store of a Thumb block transfer, or
+   the next update_gba; cleared by every RAM translation-cache flush. */
+u32 sh4_block_store_smc_pending = 0;
+void sh4_block_store_smc(u32 next_pc, u32 cycles);
+
 void function_cc execute_aligned_store32(u32 address, u32 source)
 {
   u8 *map;
 
   if(!(address & 0xF0000000) && (map = memory_map_write[address >> 15]))
-    address32(map, address & 0x7FFF) = source;
-  else
-    write_memory32(address, source);
+  {
+    u32 offset = address & 0x7FFF;
+    address32(map, offset) = source;
+
+    /* Writable pages are preceded by their 32KB translation-tag area. */
+    if(*(u32 *)(map + offset - 0x8000) != 0)
+      sh4_block_store_smc_pending = 1;
+  }
+  else if(write_memory32(address, source) == CPU_ALERT_SMC)
+  {
+    sh4_block_store_smc_pending = 1;
+  }
 }
 u32 function_cc execute_lsl_reg_op(u32 value, u32 shift)
 {
@@ -509,11 +525,15 @@ void function_cc execute_mul_long_u64(u32 rm, u32 rs)
 }
 void function_cc execute_swi(u32 pc)
 {
-  reg_mode[MODE_SUPERVISOR][6] = pc;
   collapse_flags();
   spsr[MODE_SUPERVISOR] = reg[REG_CPSR];
   reg[REG_CPSR] = (reg[REG_CPSR] & ~0x3F) | 0x13;
   set_cpu_mode(MODE_SUPERVISOR);
+  /* Set the live LR after switching: a SWI taken in Supervisor mode is a
+     same-mode switch that leaves the bank untouched, so writing the banked
+     LR beforehand never reached r14 and the BIOS read the SWI number
+     through a stale return address. */
+  reg[REG_LR] = pc;
 }
 static u32 block_memory_reg_count(u32 reg_list)
 {
@@ -527,7 +547,8 @@ static u32 block_memory_user_bank(u32 reg_num, u32 s_bit)
    (reg_num >= 13 || (reg_num >= 8 && reg[CPU_MODE] == MODE_FIQ));
 }
 
-void function_cc execute_arm_block_memory(u32 opcode, u32 insn_pc)
+void function_cc execute_arm_block_memory(u32 opcode, u32 insn_pc,
+ u32 cycles)
 {
   u32 rn = (opcode >> 16) & 0x0F;
   u32 reg_list = opcode & 0xFFFF;
@@ -612,6 +633,14 @@ void function_cc execute_arm_block_memory(u32 opcode, u32 insn_pc)
       execute_aligned_store32(address, insn_pc + 8);
     }
   }
+
+  /* The stores may have overwritten translated RAM code, including the
+     block that called this helper, so resume at the next instruction
+     through the dispatcher rather than returning into flushed code. An
+     LDM leaves any pending alert for a later consumer, since the emitted
+     code dispatches its PC load itself. */
+  if(!load && sh4_block_store_smc_pending)
+    sh4_block_store_smc(insn_pc + 4, cycles);
 }
 
 void swi_hle_div()

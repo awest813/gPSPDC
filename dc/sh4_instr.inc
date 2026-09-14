@@ -742,10 +742,13 @@
 
 #define arm_block_memory_branch_pc_store()                                    \
 
+/* r6 carries the live cycle counter so a store that overwrites translated
+   code can resume through the dispatcher. */
 #define arm_block_memory(access_type, pre_op, post_op, s_bit)                 \
 {                                                                             \
   generate_load_imm(a0, opcode);                                              \
   generate_load_pc(a1, pc);                                                   \
+  SH4_EMIT_MOV(sh4_reg_r6, REG_CYCLES);                                       \
   generate_function_call(execute_arm_block_memory);                           \
   arm_block_memory_branch_pc_##access_type();                                 \
 }                                                                             \

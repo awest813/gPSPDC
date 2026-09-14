@@ -13,7 +13,12 @@ typedef uint32_t u32;
 typedef int32_t s32;
 typedef uint64_t u64;
 typedef int64_t s64;
+/* cpu.h is included without _arch_dreamcast, so it declares the two-argument
+   block-transfer helper used by other backends; the SH-4 helper under test
+   takes the live cycle counter as well. */
+#define execute_arm_block_memory execute_arm_block_memory_other_backends
 #include "../cpu.h"
+#undef execute_arm_block_memory
 #define REG_IE 0
 #define REG_IF 1
 #define REG_IME 2
@@ -196,6 +201,97 @@ static void exception_return(void)
       }
 }
 
+static u32 smc_dispatches, smc_dispatch_pc, smc_dispatch_cycles;
+
+void sh4_block_store_smc(u32 next_pc, u32 cycles)
+{
+  /* Production flushes the RAM cache (clearing the alert) and never
+     returns; record the dispatch instead. */
+  smc_dispatches++;
+  smc_dispatch_pc = next_pc;
+  smc_dispatch_cycles = cycles;
+  sh4_block_store_smc_pending = 0;
+}
+
+static void block_store_smc(void)
+{
+  static u32 tagged_words[16384];
+  u32 *const words = tagged_words + 8192; /* 32KB tag area first */
+  u32 hit;
+  memory_map_read[0x03000000 >> 15] = (u8 *)words;
+  memory_map_write[0x03000000 >> 15] = (u8 *)words;
+  for(hit = 0; hit < 4; hit++)
+  {
+    /* STMIA R0!,{R1-R3} with the first, middle, last or no stored word
+       over translated code. */
+    memset(tagged_words, 0, sizeof(tagged_words));
+    memset(reg, 0, sizeof(reg));
+    reg[CPU_MODE] = MODE_USER;
+    reg[0] = 0x03000100;
+    reg[1] = 0x11; reg[2] = 0x22; reg[3] = 0x33;
+    if(hit < 3)
+      tagged_words[0x40 + hit] = 0xFFFFFFFF;
+    smc_dispatches = 0;
+    sh4_block_store_smc_pending = 0;
+    execute_arm_block_memory(0xE8A0000E, 0x03000200, 0x777);
+    check(words[0x40] == 0x11 && words[0x41] == 0x22 && words[0x42] == 0x33 &&
+     reg[0] == 0x0300010C, "STM stores and writes back before SMC dispatch",
+     hit, 0, 0);
+    check(hit < 3 ? (smc_dispatches == 1 && smc_dispatch_pc == 0x03000204 &&
+     smc_dispatch_cycles == 0x777) : smc_dispatches == 0,
+     "STM over translated code resumes at the next instruction", hit, 0, 0);
+    check(sh4_block_store_smc_pending == 0, "STM consumes the SMC alert",
+     hit, 0, 0);
+  }
+
+  /* LDM leaves an earlier alert for a consumer that can dispatch. */
+  memset(tagged_words, 0, sizeof(tagged_words));
+  memset(reg, 0, sizeof(reg));
+  reg[0] = 0x03000100;
+  smc_dispatches = 0;
+  sh4_block_store_smc_pending = 1;
+  execute_arm_block_memory(0xE8B0000E, 0x03000200, 0x777); /* LDMIA R0!,{R1-R3} */
+  check(smc_dispatches == 0 && sh4_block_store_smc_pending == 1,
+   "LDM leaves a pending SMC alert", 0, 0, 0);
+  sh4_block_store_smc_pending = 0;
+}
+
+static void swi_entry(void)
+{
+  unsigned from, thumb;
+  for(from = MODE_USER; from <= MODE_UNDEFINED; from++)
+    for(thumb = 0; thumb < 2; thumb++)
+    {
+      u32 return_pc = 0x03007DDC - (thumb * 2);
+      u32 old_cpsr = 0x1F | (thumb << 5);
+      memset(reg, 0, sizeof(reg));
+      memset(reg_mode, 0, sizeof(reg_mode));
+      memset(spsr, 0, sizeof(spsr));
+      reg[CPU_MODE] = from;
+      reg[REG_CPSR] = old_cpsr;
+      reg[REG_N_FLAG] = 1;
+      reg[REG_C_FLAG] = 1;
+      reg[REG_SP] = 0x4000; reg[REG_LR] = 0x4001;
+      reg_mode[MODE_SUPERVISOR][5] = 0x5000;
+      reg_mode[MODE_SUPERVISOR][6] = 0x5001;
+      execute_swi(return_pc);
+      /* LR_svc must hold the return address even for a SWI taken in
+         Supervisor mode, where the mode switch leaves the bank alone. */
+      check(reg[REG_LR] == return_pc, "SWI sets live LR_svc", from, thumb, 0);
+      check(reg[CPU_MODE] == MODE_SUPERVISOR &&
+       (reg[REG_CPSR] & 0x3F) == 0x13, "SWI enters ARM Supervisor",
+       from, thumb, 0);
+      check(spsr[MODE_SUPERVISOR] == (0xA0000000 | old_cpsr),
+       "SWI snapshots CPSR into SPSR_svc", from, thumb, 0);
+      if(from == MODE_SUPERVISOR)
+        check(reg[REG_SP] == 0x4000, "SWI in SVC keeps SP", from, thumb, 0);
+      else
+        check(reg[REG_SP] == 0x5000 && reg_mode[from][5] == 0x4000 &&
+         reg_mode[from][6] == 0x4001, "SWI banks caller SP/LR",
+         from, thumb, 0);
+    }
+}
+
 static void mode_banks(void)
 {
   unsigned from, to, i;
@@ -237,7 +333,8 @@ static void mode_banks(void)
 
 static void block_transfers(void)
 {
-  static u32 words[8192];
+  static u32 tagged_words[16384];
+  u32 *const words = tagged_words + 8192; /* 32KB tag area first */
   u32 up, pre, load, bank, i;
   memory_map_read[0x02000000 >> 15] = (u8 *)words;
   memory_map_write[0x02000000 >> 15] = (u8 *)words;
@@ -251,7 +348,7 @@ static void block_transfers(void)
           u32 start = 0x100 + (up ? (pre ? 4 : 0) : (pre ? -12 : -8));
           u32 opcode = 0xE8000000 | (pre << 24) | (up << 23) |
            (bank << 22) | ((!bank) << 21) | (load << 20) | list;
-          memset(words, 0, sizeof(words));
+          memset(words, 0, 8192 * sizeof(u32));
           memset(reg, 0, sizeof(reg));
           memset(reg_mode, 0, sizeof(reg_mode));
           reg[CPU_MODE] = MODE_SUPERVISOR;
@@ -262,7 +359,7 @@ static void block_transfers(void)
           reg_mode[MODE_USER][5] = 0xAA;
           if(load)
             for(i = 0; i < 3; i++) words[start / 4 + i] = 0x1000 + i;
-          execute_arm_block_memory(opcode, 0x08000000);
+          execute_arm_block_memory(opcode, 0x08000000, 0x1234);
           if(load)
           {
             check(reg[8] == 0x1000 && reg[12] == 0x1001 &&
@@ -298,7 +395,7 @@ static void block_transfers(void)
           words[start / 4] = 0x1234;
           words[start / 4 + 1] = 0x5678;
           words[start / 4 + 2] = target;
-          execute_arm_block_memory(opcode, 0x08000000);
+          execute_arm_block_memory(opcode, 0x08000000, 0x1234);
           check(reg[REG_PC] == expected && reg[8] == 0x1234 && reg[14] == 0x5678 &&
            reg[REG_CPSR] == (bank ? spsr[MODE_SUPERVISOR] : 0x93),
            "LDM PC/exception return", up, pre, bank);
@@ -309,7 +406,8 @@ static void block_transfers(void)
 
 static void fiq_and_ldm_returns(void)
 {
-  static u32 words[8192];
+  static u32 tagged_words[16384];
+  u32 *const words = tagged_words + 8192; /* 32KB tag area first */
   u32 i, thumb, irq;
   memory_map_read[0x02000000 >> 15] = (u8 *)words;
   memory_map_write[0x02000000 >> 15] = (u8 *)words;
@@ -325,14 +423,14 @@ static void fiq_and_ldm_returns(void)
   reg_mode[MODE_USER][5] = 0x7000;
   reg_mode[MODE_USER][6] = 0x7001;
   set_cpu_mode(MODE_FIQ);
-  execute_arm_block_memory(0xE8C07F00, 0x08000000); /* STMIA R0,{R8-R14}^ */
+  execute_arm_block_memory(0xE8C07F00, 0x08000000, 0x1234); /* STMIA R0,{R8-R14}^ */
   for(i = 0; i < 7; i++)
   {
     check(words[64 + i] == (i < 5 ? 0x1008 + i : 0x7000 + i - 5),
      "FIQ stores shared user bank", i, 0, 0);
     words[64 + i] = 0x8000 + i;
   }
-  execute_arm_block_memory(0xE8D07F00, 0x08000000); /* LDMIA R0,{R8-R14}^ */
+  execute_arm_block_memory(0xE8D07F00, 0x08000000, 0x1234); /* LDMIA R0,{R8-R14}^ */
   for(i = 8; i < 13; i++)
     check(reg[i] == 0x2000 + i, "FIQ load preserves FIQ bank", i, 0, 0);
   check(reg_mode[MODE_USER][5] == 0x8005 && reg_mode[MODE_USER][6] == 0x8006,
@@ -356,7 +454,7 @@ static void fiq_and_ldm_returns(void)
       spsr[MODE_SUPERVISOR] = restored;
       words[64] = 0x1234; words[65] = 0x5678; words[66] = 0x08000203;
       io_registers[REG_IE] = io_registers[REG_IF] = io_registers[REG_IME] = irq;
-      execute_arm_block_memory(0xE8FDC001, 0x08000000);
+      execute_arm_block_memory(0xE8FDC001, 0x08000000, 0x1234);
       check(reg_mode[MODE_SUPERVISOR][5] == 0x0200010C &&
        reg_mode[MODE_SUPERVISOR][6] == 0x5678 && reg[0] == 0x1234 &&
        reg_mode[MODE_USER][5] == 0x02001000 && reg_mode[MODE_USER][6] == 0xABCD,
@@ -392,7 +490,9 @@ int main(void)
   }
   cpsr_masked_write();
   exception_return();
+  swi_entry();
   block_transfers();
+  block_store_smc();
   mode_banks();
   fiq_and_ldm_returns();
   printf("SH-4 helpers: %u checks, %u failures\n", checks, failures);
