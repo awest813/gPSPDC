@@ -105,6 +105,9 @@ static u32 sh4_dispatch_stack;
    it. Read only by the bad-jump report in cpu_threaded.c. */
 u8 *sh4_dispatch_return;
 
+/* Helper call targets, indexed by the slots sh4_helper_slot() hands out. */
+u32 sh4_helper_table[SH4_HELPER_TABLE_SIZE];
+
 static void __attribute__((noreturn, noinline))
  sh4_dispatch_block(u8 *target, u32 cycles)
 {
@@ -115,16 +118,27 @@ static void __attribute__((noreturn, noinline))
   register u32 dispatch_stack asm("r1") = sh4_dispatch_stack;
   register u32 *dispatch_base asm("r2") = reg;
   register u32 dispatch_cycles asm("r3") = cycles;
+  register u32 *dispatch_helpers asm("r4") = sh4_helper_table;
 
+  /* r8 = &reg[16]: the emitter's base for flags, CPSR and dispatch state.
+     r9, r10, r11 = helper table slots 0, 16 and 32 (see sh4_emit.h). */
   __asm__ __volatile__(
     "mov %[stk], r15\n\t"
     "mov %[regptr], r12\n\t"
+    "mov %[regptr], r8\n\t"
+    "add #64, r8\n\t"
+    "mov %[helpers], r9\n\t"
+    "mov %[helpers], r10\n\t"
+    "add #64, r10\n\t"
+    "mov r10, r11\n\t"
+    "add #64, r11\n\t"
     "mov %[cyc], r13\n\t"
     "jmp @%[tgt]\n\t"
     "nop\n\t"
     :
     : [tgt] "r" (dispatch_target), [regptr] "r" (dispatch_base),
-      [cyc] "r" (dispatch_cycles), [stk] "r" (dispatch_stack)
+      [cyc] "r" (dispatch_cycles), [stk] "r" (dispatch_stack),
+      [helpers] "r" (dispatch_helpers)
     : "memory"
   );
   __builtin_unreachable();

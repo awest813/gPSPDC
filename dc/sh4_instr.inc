@@ -460,11 +460,84 @@
   arm_decode_data_proc_imm();                                                 \
   generate_load_imm(a0, imm)                                                  \
 
+/* Data processing that sets no flags is emitted inline, computing exactly
+   what the execute_<name>(rm, rn) helpers compute: r4 (a0) holds the second
+   operand, r5 (a1) holds rn, and the result lands in r0 (rv). Each form took a
+   helper call before. Flag-setting forms still call their helpers. */
+#define arm_data_proc_op_add()                                                \
+  SH4_EMIT_ADD(sh4_reg_r0, sh4_reg_r5, sh4_reg_r4)                            \
+
+#define arm_data_proc_op_sub()                                                \
+  SH4_EMIT_SUB(sh4_reg_r0, sh4_reg_r5, sh4_reg_r4)                            \
+
+#define arm_data_proc_op_rsb()                                                \
+  SH4_EMIT_SUB(sh4_reg_r0, sh4_reg_r4, sh4_reg_r5)                            \
+
+#define arm_data_proc_op_and()                                                \
+  SH4_EMIT_AND(sh4_reg_r0, sh4_reg_r5, sh4_reg_r4)                            \
+
+#define arm_data_proc_op_orr()                                                \
+  SH4_EMIT_OR(sh4_reg_r0, sh4_reg_r5, sh4_reg_r4)                             \
+
+#define arm_data_proc_op_eor()                                                \
+  SH4_EMIT_XOR(sh4_reg_r0, sh4_reg_r5, sh4_reg_r4)                            \
+
+#define arm_data_proc_op_bic()                                                \
+  do {                                                                        \
+    SH4_EMIT_NOT(sh4_reg_r0, sh4_reg_r4);                                     \
+    SH4_EMIT_AND(sh4_reg_r0, sh4_reg_r0, sh4_reg_r5);                         \
+  } while(0)                                                                  \
+
+/* rn + rm + C */
+#define arm_data_proc_op_adc()                                                \
+  do {                                                                        \
+    SH4_EMIT_ADD(sh4_reg_r0, sh4_reg_r5, sh4_reg_r4);                         \
+    SH4_EMIT_LOAD_REG(sh4_reg_r1, REG_C_FLAG);                                \
+    SH4_EMIT_ADD(sh4_reg_r0, sh4_reg_r0, sh4_reg_r1);                         \
+  } while(0)                                                                  \
+
+/* rn - rm - (1 - C) */
+#define arm_data_proc_op_sbc()                                                \
+  do {                                                                        \
+    SH4_EMIT_SUB(sh4_reg_r0, sh4_reg_r5, sh4_reg_r4);                         \
+    SH4_EMIT_LOAD_REG(sh4_reg_r1, REG_C_FLAG);                                \
+    SH4_EMIT_ADD(sh4_reg_r0, sh4_reg_r0, sh4_reg_r1);                         \
+    SH4_EMIT_ADDI8(sh4_reg_r0, -1);                                           \
+  } while(0)                                                                  \
+
+/* rm - rn - (1 - C) */
+#define arm_data_proc_op_rsc()                                                \
+  do {                                                                        \
+    SH4_EMIT_SUB(sh4_reg_r0, sh4_reg_r4, sh4_reg_r5);                         \
+    SH4_EMIT_LOAD_REG(sh4_reg_r1, REG_C_FLAG);                                \
+    SH4_EMIT_ADD(sh4_reg_r0, sh4_reg_r0, sh4_reg_r1);                         \
+    SH4_EMIT_ADDI8(sh4_reg_r0, -1);                                           \
+  } while(0)                                                                  \
+
+#define arm_data_proc_op_mov()                                                \
+  SH4_EMIT_MOV(sh4_reg_r0, sh4_reg_r4)                                        \
+
+#define arm_data_proc_op_adds() generate_function_call(execute_adds)
+#define arm_data_proc_op_subs() generate_function_call(execute_subs)
+#define arm_data_proc_op_rsbs() generate_function_call(execute_rsbs)
+#define arm_data_proc_op_ands() generate_function_call(execute_ands)
+#define arm_data_proc_op_orrs() generate_function_call(execute_orrs)
+#define arm_data_proc_op_eors() generate_function_call(execute_eors)
+#define arm_data_proc_op_bics() generate_function_call(execute_bics)
+#define arm_data_proc_op_adcs() generate_function_call(execute_adcs)
+#define arm_data_proc_op_sbcs() generate_function_call(execute_sbcs)
+#define arm_data_proc_op_rscs() generate_function_call(execute_rscs)
+
+#define arm_data_proc_unary_op_mov() arm_data_proc_op_mov()
+#define arm_data_proc_unary_op_mvn() SH4_EMIT_NOT(sh4_reg_r0, sh4_reg_r4)
+#define arm_data_proc_unary_op_movs() generate_function_call(execute_movs)
+#define arm_data_proc_unary_op_mvns() generate_function_call(execute_mvns)
+
 #define arm_data_proc(name, type, flags_op)                                   \
 {                                                                             \
   arm_data_proc_##type();                                                     \
   generate_load_reg_pc(a1, rn, 8);                                            \
-  generate_function_call(execute_##name);                                     \
+  arm_data_proc_op_##name();                                                  \
   generate_store_reg_pc_##flags_op(rv, rd);                                   \
 }                                                                             \
 
@@ -478,7 +551,7 @@
 #define arm_data_proc_unary(name, type, flags_op)                             \
 {                                                                             \
   arm_data_proc_##type();                                                     \
-  generate_function_call(execute_##name);                                     \
+  arm_data_proc_unary_op_##name();                                            \
   generate_store_reg_pc_##flags_op(rv, rd);                                   \
 }                                                                             \
 
@@ -822,7 +895,7 @@
   thumb_decode_hireg_op();                                                    \
   generate_load_reg_pc(a0, rs, 4);                                            \
   generate_load_reg_pc(a1, rd, 4);                                            \
-  generate_function_call(execute_##name);                                     \
+  arm_data_proc_op_##name();                                                  \
   generate_store_reg_pc_thumb(rv);                                            \
 }                                                                             \
 

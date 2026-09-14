@@ -16,6 +16,9 @@ typedef uint16_t u16;
 typedef int32_t s32;
 typedef uint32_t u32;
 
+/* cpu.h is not included; inline carry operations load reg[REG_C_FLAG]. */
+#define REG_C_FLAG 18
+
 #ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmacro-redefined"
@@ -82,11 +85,25 @@ static void expect_words(const char *name, const u16 *expected, size_t count)
 
 static void test_load_store_encodings(void)
 {
-  const u16 expected[] = { 0x54C4, 0x1C55 };
+  const u16 expected[] = {
+    0x54C4, /* mov.l @(16,r12),r4 */
+    0x1C55, /* mov.l r5,@(20,r12) */
+    0x54CF, /* reg[15]: one instruction off r12 */
+    0x5482, /* reg[18], the C flag: one instruction off r8 = &reg[16] */
+    0x185F, /* reg[31] stored off r8 */
+    0xE280, /* reg[32] is beyond both windows: r2 = 128 ... */
+    0x622C,
+    0x32CC, /* ... + r12 ... */
+    0x5420  /* ... then load */
+  };
 
   reset_buffer();
   SH4_EMIT_LW(sh4_reg_r4, sh4_reg_r12, 16);
   SH4_EMIT_SW(sh4_reg_r5, sh4_reg_r12, 20);
+  SH4_EMIT_LOAD_REG(sh4_reg_r4, 15);
+  SH4_EMIT_LOAD_REG(sh4_reg_r4, 18);
+  SH4_EMIT_STORE_REG(sh4_reg_r5, 31);
+  SH4_EMIT_LOAD_REG(sh4_reg_r4, 32);
   expect_words("load/store displacement encodings", expected,
    sizeof(expected) / sizeof(expected[0]));
 }
@@ -580,6 +597,58 @@ static void test_long_branch_filler_patch(void)
   }
 }
 
+u32 sh4_helper_table[SH4_HELPER_TABLE_SIZE];
+
+/* Helper calls load their target from the table off r9, r10 and r11. */
+static void test_helper_call_table(void)
+{
+  u32 i;
+  int before = failures;
+
+  memset(sh4_helper_table, 0, sizeof(sh4_helper_table));
+
+  for(i = 0; i <= SH4_HELPER_TABLE_SIZE; i++)
+  {
+    const u32 target = 0x8C010000 + i * 4;
+    const u16 load = (u16)(0x5100 | ((9 + i / 16) << 4) | (i % 16));
+
+    reset_buffer();
+    SH4_EMIT_FUNCTION_CALL(target);
+
+    if(i < SH4_HELPER_TABLE_SIZE)
+    {
+      /* mov.l @((slot % 16) * 4, r9 + slot / 16), r1; jsr @r1; nop */
+      if((translation_ptr - code_buffer) != 3 || code_buffer[0] != load ||
+       code_buffer[1] != 0x410B || code_buffer[2] != 0x0009 ||
+       sh4_helper_table[i] != target)
+      {
+        if(failures++ - before < 4)
+          printf("helper slot %u: %04x %04x %04x, %d words\n", i,
+           code_buffer[0], code_buffer[1], code_buffer[2],
+           (int)(translation_ptr - code_buffer));
+      }
+    }
+    else if(((translation_ptr - code_buffer) <= 3) ||
+     ((code_buffer[0] & 0xF000) == 0x5000))
+    {
+      printf("helper table overflow did not fall back to an address load\n");
+      failures++;
+    }
+  }
+
+  /* Emitting a call to a known helper again reuses its slot. */
+  reset_buffer();
+  SH4_EMIT_FUNCTION_CALL(0x8C010000 + 17 * 4);
+  if(code_buffer[0] != 0x51A1)
+  {
+    printf("helper slot reuse failed: %04x\n", code_buffer[0]);
+    failures++;
+  }
+
+  memset(sh4_helper_table, 0, sizeof(sh4_helper_table));
+  printf("helper call table: %s\n", failures == before ? "ok" : "FAILED");
+}
+
 static void test_icache_range_hook(void)
 {
   u8 cache[64];
@@ -619,9 +688,11 @@ int main(void)
 {
   test_executed_emission();
   test_executed_constant_shifts();
+  test_executed_inline_alu();
   test_load_store_encodings();
   test_alu_encodings();
   test_shift_and_call_encodings();
+  test_helper_call_table();
   test_branch_filler_polarity();
   test_conditional_skip_patch();
   test_far_conditional_skip();

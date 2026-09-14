@@ -125,6 +125,18 @@ static void test_sh4_stub_async_exit_contract(void)
   expect_contains("dispatch stack base", text, "static u32 sh4_dispatch_stack;");
   expect_contains("dispatch stack reset", text, "mov %[stk], r15");
   expect_contains("dispatch cycle reload", text, "mov %[cyc], r13");
+  /* Flags, CPSR and dispatch state (reg[16..31]) load off r8 = &reg[16]. */
+  expect_contains("dispatch flag base", text,
+   "\"mov %[regptr], r8\\n\\t\"\n    \"add #64, r8\\n\\t\"");
+  /* Helper call targets load off r9, r10 and r11 = slots 0, 16 and 32. */
+  expect_contains("helper table storage", text,
+   "u32 sh4_helper_table[SH4_HELPER_TABLE_SIZE];");
+  expect_contains("dispatch helper table pinned off r12/r13/r15", text,
+   "register u32 *dispatch_helpers asm(\"r4\") = sh4_helper_table;");
+  expect_contains("dispatch helper bases", text,
+   "\"mov %[helpers], r9\\n\\t\"\n    \"mov %[helpers], r10\\n\\t\"\n"
+   "    \"add #64, r10\\n\\t\"\n    \"mov r10, r11\\n\\t\"\n"
+   "    \"add #64, r11\\n\\t\"");
   expect_contains("dispatch stack capture", text,
    "__asm__ __volatile__(\"mov r15, %0\" : \"=r\" (sh4_dispatch_stack));");
   expect_contains("dispatch target pinned off r12/r13/r15", text,

@@ -1,3 +1,17 @@
+/* Register-relative loads and stores read and write this small memory, based
+   at SIM_MEMORY_BASE; any other address fails the simulation. */
+#define SIM_MEMORY_BASE 0x00100000
+static u32 sim_memory[64];
+
+static int sim_memory_index(u32 address, u32 *index)
+{
+  if((address & 3) || (address < SIM_MEMORY_BASE) ||
+   (address - SIM_MEMORY_BASE) / 4 >= sizeof(sim_memory) / sizeof(sim_memory[0]))
+    return 0;
+  *index = (address - SIM_MEMORY_BASE) / 4;
+  return 1;
+}
+
 /* Deliberately small test interpreter for the emitter sequences below.
    Unsupported instructions, invalid targets, and non-NOP delay slots fail.
    It is not an SH-4 CPU emulator or a timing model. */
@@ -73,6 +87,20 @@ static int simulate_emission(u32 regs[16], u32 t)
       }
       else next = regs[n];
     }
+    else if((op & 0xF000) == 0x5000)
+    {
+      /* mov.l @(disp,Rm),Rn */
+      u32 index;
+      if(!sim_memory_index(regs[m] + (op & 15) * 4, &index)) return 0;
+      regs[n] = sim_memory[index];
+    }
+    else if((op & 0xF000) == 0x1000)
+    {
+      /* mov.l Rm,@(disp,Rn) */
+      u32 index;
+      if(!sim_memory_index(regs[n] + (op & 15) * 4, &index)) return 0;
+      sim_memory[index] = regs[m];
+    }
     else if((op & 0xF000) == 0xD000)
     {
       u32 literal = ((pc + 4) & ~3u) + (op & 255) * 4 - base;
@@ -136,6 +164,77 @@ static void test_executed_emission(void)
           failures++;
       }
   printf("executed immediate/conditional sequences: %s\n",
+   failures == before ? "ok" : "FAILED");
+}
+
+/* Inline data processing, executed against the helpers' definitions in
+   dc/sh4_helpers.c. r4 holds the second operand (rm), r5 holds rn, and r8
+   points at reg[16]; r1 and r2 are scratch. */
+static void test_executed_inline_alu(void)
+{
+  static const u32 values[] = {0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF,
+   0x12345678, 0xDEADBEEF};
+  static const char *names[] = {"add", "sub", "rsb", "and", "orr", "eor",
+   "bic", "adc", "sbc", "rsc", "mov", "mvn"};
+  const u32 count = sizeof(values) / sizeof(values[0]);
+  const u32 flag_base = SIM_MEMORY_BASE + 16 * 4;
+  u32 op, a, b, carry, r;
+  int before = failures;
+
+  for(op = 0; op < sizeof(names) / sizeof(names[0]); op++)
+    for(a = 0; a < count; a++)
+      for(b = 0; b < count; b++)
+        for(carry = 0; carry < 2; carry++)
+        {
+          u32 regs[16], rm = values[a], rn = values[b], expected;
+
+          memset(regs, 0x5A, sizeof(regs));
+          memset(sim_memory, 0, sizeof(sim_memory));
+          sim_memory[REG_C_FLAG] = carry;
+          regs[4] = rm;
+          regs[5] = rn;
+          regs[8] = flag_base;
+          reset_buffer();
+
+          switch(op)
+          {
+            case 0: arm_data_proc_op_add(); expected = rn + rm; break;
+            case 1: arm_data_proc_op_sub(); expected = rn - rm; break;
+            case 2: arm_data_proc_op_rsb(); expected = rm - rn; break;
+            case 3: arm_data_proc_op_and(); expected = rn & rm; break;
+            case 4: arm_data_proc_op_orr(); expected = rn | rm; break;
+            case 5: arm_data_proc_op_eor(); expected = rn ^ rm; break;
+            case 6: arm_data_proc_op_bic(); expected = rn & ~rm; break;
+            case 7: arm_data_proc_op_adc(); expected = rn + rm + carry; break;
+            case 8:
+              arm_data_proc_op_sbc();
+              expected = rn - rm - (carry ^ 1);
+              break;
+            case 9:
+              arm_data_proc_op_rsc();
+              expected = rm + carry - 1 - rn;
+              break;
+            case 10: arm_data_proc_op_mov(); expected = rm; break;
+            default: arm_data_proc_unary_op_mvn(); expected = ~rm; break;
+          }
+
+          if(!simulate_emission(regs, 0) || regs[0] != expected)
+          {
+            if(failures++ - before < 8)
+              printf("inline %s rm=%08x rn=%08x c=%u: got %08x, expected %08x\n",
+               names[op], rm, rn, carry, regs[0], expected);
+          }
+
+          for(r = 3; r < 16; r++)
+          {
+            u32 kept = (r == 4) ? rm : (r == 5) ? rn : (r == 8) ? flag_base :
+             0x5A5A5A5A;
+            if(regs[r] != kept)
+              failures++;
+          }
+        }
+
+  printf("executed inline data processing: %s\n",
    failures == before ? "ok" : "FAILED");
 }
 

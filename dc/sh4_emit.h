@@ -353,15 +353,69 @@ static inline void sh4_patch_cond_hop(void *hop, const void *target)
     } \
   } while(0)
 
+/* mov.l @(disp,Rn) reaches 60 bytes: reg[0] to reg[15] off REG_BASE (r12).
+   The flags, CPSR, mode and dispatch state (reg[16] to reg[31]) load off
+   REG_FLAG_BASE (r8), which the dispatcher points at &reg[16]; building the
+   offset in a scratch register took three instructions per access. r8 is
+   callee-saved, so C helpers preserve it, and the emitter never writes it. */
+#define REG_FLAG_BASE sh4_reg_r8
+
 #define SH4_EMIT_LOAD_REG(ireg, reg_index) \
-  SH4_EMIT_LOAD_MEM_W(ireg, REG_BASE, (reg_index) * 4)
+  do { \
+    u32 _load_reg = (u32)(reg_index); \
+    if((_load_reg >= 16) && (_load_reg < 32)) { \
+      SH4_EMIT_LW((ireg), REG_FLAG_BASE, (_load_reg - 16) * 4); \
+    } else { \
+      SH4_EMIT_LOAD_MEM_W((ireg), REG_BASE, _load_reg * 4); \
+    } \
+  } while(0)
 
 #define SH4_EMIT_STORE_REG(ireg, reg_index) \
-  SH4_EMIT_STORE_MEM_W(ireg, REG_BASE, (reg_index) * 4)
+  do { \
+    u32 _store_reg = (u32)(reg_index); \
+    if((_store_reg >= 16) && (_store_reg < 32)) { \
+      SH4_EMIT_SW((ireg), REG_FLAG_BASE, (_store_reg - 16) * 4); \
+    } else { \
+      SH4_EMIT_STORE_MEM_W((ireg), REG_BASE, _store_reg * 4); \
+    } \
+  } while(0)
+
+/* Emitted code calls helpers through a table reached from the callee-saved
+   r9, r10 and r11, which the dispatcher points at slots 0, 16 and 32. Loading
+   a target takes one instruction; building a 32-bit address took up to 14.
+   A helper gets a slot the first time a call to it is emitted, and slots are
+   never reused, so code emitted earlier stays valid. */
+#define SH4_HELPER_TABLE_SIZE 48
+extern u32 sh4_helper_table[SH4_HELPER_TABLE_SIZE];
+
+static inline s32 sh4_helper_slot(u32 address)
+{
+  s32 slot;
+
+  for(slot = 0; slot < SH4_HELPER_TABLE_SIZE; slot++)
+  {
+    if(sh4_helper_table[slot] == address)
+      return slot;
+
+    if(sh4_helper_table[slot] == 0)
+    {
+      sh4_helper_table[slot] = address;
+      return slot;
+    }
+  }
+
+  return -1;
+}
 
 #define SH4_EMIT_FUNCTION_CALL(func) \
   do { \
-    SH4_EMIT_LOAD_IMM(sh4_reg_r1, (u32)(func)); \
+    s32 _helper_slot = sh4_helper_slot((u32)(func)); \
+    if(_helper_slot >= 0) { \
+      SH4_EMIT_LW(sh4_reg_r1, sh4_reg_r9 + (_helper_slot / 16), \
+       (_helper_slot % 16) * 4); \
+    } else { \
+      SH4_EMIT_LOAD_IMM(sh4_reg_r1, (u32)(func)); \
+    } \
     SH4_EMIT_JSR(sh4_reg_r1); \
   } while(0)
 
