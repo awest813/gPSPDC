@@ -30,10 +30,16 @@ KOS_CFLAGS += -D_arch_dreamcast=1 -DGPSP_DC_BLIT_MEMCPY $(KOS_ZIP_CFLAGS) \
     -I$(KOS_BASE)/../kos-ports/include/zlib
 CFLAGS += $(KOS_CFLAGS)
 
+# Track header dependencies. Without them, editing dc/sh4_emit.h or
+# dc/sh4_instr.inc left cpu_threaded.o stale and builds silently kept the old
+# recompiler. -MMD writes a .d file beside each object; -MP adds phony header
+# targets so that removing a header does not break the build.
+CFLAGS += -MMD -MP
+
 all: $(TARGET)
 
 clean:
-	-rm -f $(TARGET) $(OBJS) romdisk.img romdisk.o
+	-rm -f $(TARGET) $(OBJS) $(OBJS:.o=.d) romdisk.img romdisk.o
 
 $(TARGET): $(OBJS)
 	kos-cc -o $(TARGET) $(OBJS) -L$(KOS_BASE)/lib/dreamcast -L$(KOS_BASE)/addons/lib/dreamcast -L$(KOS_BASE)/../kos-ports/lib \
@@ -47,3 +53,5 @@ dist: $(TARGET)
 
 # Rebuild the shared register-bank switch when its implementation changes.
 cpu.o: ../cpu_mode.h
+
+-include $(OBJS:.o=.d)
