@@ -994,28 +994,77 @@ static void dc_perf_count_frame(u64 now_us)
 }
 #endif
 
+#ifdef GPSP_DC_BENCHMARK
+/* Fixed workload for comparing builds: every frame is drawn, nothing waits,
+   and the time for emulated frames BENCH_FIRST_FRAME to BENCH_LAST_FRAME
+   after boot appears below the picture. Without input a game's attract
+   sequence repeats exactly in emulated frames, so the span is the same work
+   in every build. Build with GPSP_EXTRA_CFLAGS=-DGPSP_DC_BENCHMARK. */
+#define BENCH_FIRST_FRAME 600
+#define BENCH_LAST_FRAME 2400
+
+static u32 bench_frames = 0;
+static u64 bench_start_us = 0;
+static char bench_text[64] = "bench: warming up";
+
+static void dc_bench_frame(u64 now_us)
+{
+  bench_frames++;
+
+  if(bench_frames == BENCH_FIRST_FRAME)
+  {
+    bench_start_us = now_us;
+    sprintf(bench_text, "bench: timing frames %u-%u", BENCH_FIRST_FRAME,
+     BENCH_LAST_FRAME);
+  }
+  else if(bench_frames == BENCH_LAST_FRAME)
+  {
+    u64 elapsed_us = now_us - bench_start_us;
+    u32 fps_x100 = (u32)(((BENCH_LAST_FRAME - BENCH_FIRST_FRAME) *
+     100000000ULL) / elapsed_us);
+
+    sprintf(bench_text, "bench %u-%u: %u.%02u fps, %u ms", BENCH_FIRST_FRAME,
+     BENCH_LAST_FRAME, fps_x100 / 100, fps_x100 % 100,
+     (u32)(elapsed_us / 1000));
+  }
+}
+#endif
+
 void synchronize()
 {
   u64 now_us;
   u32 wait_us;
+
+#ifdef GPSP_DC_BENCHMARK
+  current_frameskip_type = no_frameskip;
+  synchronize_flag = 0;
+#endif
 
   get_ticks_us(&now_us);
 
 #ifdef GPSP_DC_SHOW_FPS
   dc_perf_count_frame(now_us);
 #endif
+#ifdef GPSP_DC_BENCHMARK
+  dc_bench_frame(now_us);
+#endif
 
   wait_us = dc_frame_pace(now_us);
   if(wait_us >= 1000)
     delay_us(wait_us);
 
+#ifndef GPSP_DC_BENCHMARK
   if(synchronize_flag == 0)
     print_string("--FF--", 0xFFFF, 0x000, 0, 0);
+#endif
 
 #ifdef GPSP_DC_SHOW_FPS
   /* Only frames about to be presented need the text. */
   if(!skip_next_frame && perf_text[0])
     print_string(perf_text, 0xFFFF, 0x0000, 0, 162);
+#endif
+#ifdef GPSP_DC_BENCHMARK
+  print_string(bench_text, 0xFFFF, 0x0000, 0, 172);
 #endif
 }
 
