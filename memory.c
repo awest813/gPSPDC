@@ -2955,6 +2955,10 @@ u32 page_time = 0;
 
 static void unmap_gamepak_physical_page(u32 physical_index)
 {
+  /* Slots that never held a page carry an out-of-range index. */
+  if(physical_index >= (gamepak_size >> GAMEPAK_SWAP_PAGE_SHIFT))
+    return;
+
   memory_map_read[GAMEPAK_ROM_MAP_BASE_INDEX + physical_index] = NULL;
   memory_map_read[(0x0A000000 >> GAMEPAK_SWAP_PAGE_SHIFT) + physical_index] = NULL;
   memory_map_read[(0x0C000000 >> GAMEPAK_SWAP_PAGE_SHIFT) + physical_index] = NULL;
@@ -3085,11 +3089,18 @@ void init_memory_gamepak()
     // Large ROMs get special treatment because they
     // can't fit into the resident ROM buffer.
     u32 i;
+
+    /* Empty slots must not claim physical page 0: evicting one used to
+       unmap page 0 while another slot still held it, so the first
+       gamepak_ram_pages page loads each forced page 0 to be read again.
+       Loaded pages start at timestamp 1 so they never tie with an empty
+       slot, which would evict the page just loaded. */
     for(i = 0; i < gamepak_ram_pages; i++)
     {
       gamepak_memory_map[i].page_timestamp = 0;
-      gamepak_memory_map[i].physical_index = 0;
+      gamepak_memory_map[i].physical_index = 0xFFFFFFFF;
     }
+    page_time = 1;
 
     map_null(read, 0x8000000, 0xD000000);
   }
