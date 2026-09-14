@@ -123,6 +123,14 @@ static void test_shift_and_call_encodings(void)
     0x4321, /* shar r3 */
     0x4305, /* rotr r3 */
     0x4318, /* shll8 r3 */
+    0x4304, /* rotl r3 */
+    0x4308, /* shll2 r3 */
+    0x4309, /* shlr2 r3 */
+    0x4319, /* shlr8 r3 */
+    0x4328, /* shll16 r3 */
+    0x4329, /* shlr16 r3 */
+    0x431C, /* shad r1,r3 */
+    0x431D, /* shld r1,r3 */
     0x410B, /* jsr @r1 */
     0x0009
   };
@@ -133,6 +141,14 @@ static void test_shift_and_call_encodings(void)
   SH4_EMIT_SHAR1(sh4_reg_r3);
   SH4_EMIT_ROTR1(sh4_reg_r3);
   SH4_EMIT_SHLL8(sh4_reg_r3);
+  SH4_EMIT_ROTL1(sh4_reg_r3);
+  SH4_EMIT_SHLL2(sh4_reg_r3);
+  SH4_EMIT_SHLR2(sh4_reg_r3);
+  SH4_EMIT_SHLR8(sh4_reg_r3);
+  SH4_EMIT_SHLL16(sh4_reg_r3);
+  SH4_EMIT_SHLR16(sh4_reg_r3);
+  SH4_EMIT_SHAD(sh4_reg_r3, sh4_reg_r1);
+  SH4_EMIT_SHLD(sh4_reg_r3, sh4_reg_r1);
   SH4_EMIT_JSR(sh4_reg_r1);
   expect_words("shift and call encodings", expected,
    sizeof(expected) / sizeof(expected[0]));
@@ -602,6 +618,7 @@ static void test_icache_range_hook(void)
 int main(void)
 {
   test_executed_emission();
+  test_executed_constant_shifts();
   test_load_store_encodings();
   test_alu_encodings();
   test_shift_and_call_encodings();

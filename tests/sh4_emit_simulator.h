@@ -22,7 +22,31 @@ static int simulate_emission(u32 regs[16], u32 t)
       regs[n] = (u32)(int32_t)(int8_t)op;
     else if((op & 0xF000) == 0x7000)
       regs[n] += (u32)(int32_t)(int8_t)op;
+    else if((op & 0xF0FF) == 0x4000) regs[n] <<= 1;
+    else if((op & 0xF0FF) == 0x4001) regs[n] >>= 1;
+    else if((op & 0xF0FF) == 0x4021) regs[n] = (u32)((int32_t)regs[n] >> 1);
+    else if((op & 0xF0FF) == 0x4004) regs[n] = (regs[n] << 1) | (regs[n] >> 31);
+    else if((op & 0xF0FF) == 0x4005) regs[n] = (regs[n] >> 1) | (regs[n] << 31);
+    else if((op & 0xF0FF) == 0x4008) regs[n] <<= 2;
+    else if((op & 0xF0FF) == 0x4009) regs[n] >>= 2;
     else if((op & 0xF0FF) == 0x4018) regs[n] <<= 8;
+    else if((op & 0xF0FF) == 0x4019) regs[n] >>= 8;
+    else if((op & 0xF0FF) == 0x4028) regs[n] <<= 16;
+    else if((op & 0xF0FF) == 0x4029) regs[n] >>= 16;
+    else if((op & 0xF00F) == 0x400C || (op & 0xF00F) == 0x400D)
+    {
+      /* shad/shld: non-negative Rm shifts left by Rm & 31; negative Rm
+         shifts right by 32 - (Rm & 31), where Rm & 31 == 0 means 32. */
+      int arithmetic = (op & 0xF00F) == 0x400C;
+      if((int32_t)regs[m] >= 0)
+        regs[n] <<= regs[m] & 31;
+      else if((regs[m] & 31) == 0)
+        regs[n] = arithmetic ? (u32)((int32_t)regs[n] >> 31) : 0;
+      else if(arithmetic)
+        regs[n] = (u32)((int32_t)regs[n] >> ((~regs[m] & 31) + 1));
+      else
+        regs[n] >>= (~regs[m] & 31) + 1;
+    }
     else if((op & 0xF00F) == 0x600C) regs[n] = regs[m] & 255;
     else if((op & 0xF00F) == 0x6003) regs[n] = regs[m];
     else if((op & 0xF00F) == 0x6007) regs[n] = ~regs[m];
@@ -113,4 +137,76 @@ static void test_executed_emission(void)
       }
   printf("executed immediate/conditional sequences: %s\n",
    failures == before ? "ok" : "FAILED");
+}
+
+/* Every constant shift the translator emits, executed against C reference
+   results for each amount. r1 and r2 are the emitter's scratch registers;
+   everything else must survive. */
+static void test_executed_constant_shifts(void)
+{
+  static const u32 values[] = {0x00000001, 0x80000000, 0xDEADBEEF,
+   0x7FFFFFFF, 0xFFFFFFFF, 0x12345678};
+  static const char *names[] = {"LSL", "LSR", "ASR", "ROR"};
+  u32 longest[4] = {0, 0, 0, 0};
+  u32 kind, amount, v, r;
+  int before = failures;
+
+  for(kind = 0; kind < 4; kind++)
+    for(amount = 0; amount < 32; amount++)
+      for(v = 0; v < sizeof(values) / sizeof(values[0]); v++)
+      {
+        u32 regs[16], value = values[v], expected = value, words;
+
+        if(kind == 3 && amount == 0)
+          continue; /* ROR #0 is RRX; the translator never emits it here. */
+
+        memset(regs, 0x5A, sizeof(regs));
+        regs[4] = value;
+        reset_buffer();
+
+        switch(kind)
+        {
+          case 0:
+            generate_shift_left(a0, amount);
+            if(amount) expected = value << amount;
+            break;
+          case 1:
+            generate_shift_right(a0, amount);
+            if(amount) expected = value >> amount;
+            break;
+          case 2:
+            generate_shift_right_arithmetic(a0, amount);
+            if(amount) expected = (u32)((int32_t)value >> amount);
+            break;
+          default:
+            generate_rotate_right(a0, amount);
+            expected = (value >> amount) | (value << (32 - amount));
+            break;
+        }
+
+        words = (u32)(translation_ptr - code_buffer);
+        if(words > longest[kind])
+          longest[kind] = words;
+
+        if(!simulate_emission(regs, 0) || regs[4] != expected)
+        {
+          if(failures++ - before < 8)
+            printf("%s #%u of %08x: got %08x, expected %08x\n", names[kind],
+             amount, value, regs[4], expected);
+        }
+
+        for(r = 0; r < 16; r++)
+          if(r != 1 && r != 2 && r != 4 && regs[r] != 0x5A5A5A5A)
+            failures++;
+      }
+
+  /* Previously one instruction per bit: up to 31 per shift. */
+  if(longest[0] > 2 || longest[1] > 2 || longest[2] > 2 || longest[3] > 6)
+  {
+    printf("constant shift lengths LSL %u LSR %u ASR %u ROR %u exceed 2/2/2/6\n",
+     longest[0], longest[1], longest[2], longest[3]);
+    failures++;
+  }
+
+  printf("executed constant shifts: %s\n", failures == before ? "ok" : "FAILED");
 }

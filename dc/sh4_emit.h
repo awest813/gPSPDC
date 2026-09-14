@@ -450,17 +450,105 @@ u32 function_cc execute_arm_translate(u32 cycles);
     SH4_EMIT_SUB(SH4_IREG(ireg), SH4_IREG(ireg), sh4_reg_r1); \
   } while(0)
 
+#define SH4_EMIT_ROTL1(rd) \
+  SH4_EMIT_BYTE(0x4004 | (((rd) & 0xF) << 8))
+
+#define SH4_EMIT_SHLL2(rd) \
+  SH4_EMIT_BYTE(0x4008 | (((rd) & 0xF) << 8))
+
+#define SH4_EMIT_SHLR2(rd) \
+  SH4_EMIT_BYTE(0x4009 | (((rd) & 0xF) << 8))
+
+#define SH4_EMIT_SHLR8(rd) \
+  SH4_EMIT_BYTE(0x4019 | (((rd) & 0xF) << 8))
+
+#define SH4_EMIT_SHLL16(rd) \
+  SH4_EMIT_BYTE(0x4028 | (((rd) & 0xF) << 8))
+
+#define SH4_EMIT_SHLR16(rd) \
+  SH4_EMIT_BYTE(0x4029 | (((rd) & 0xF) << 8))
+
+/* shad/shld Rm,Rn: shift rd by the signed amount in rm, left when it is
+   non-negative and right when it is negative. */
+#define SH4_EMIT_SHAD(rd, rm) \
+  SH4_EMIT_BYTE(0x400C | (((rd) & 0xF) << 8) | (((rm) & 0xF) << 4))
+
+#define SH4_EMIT_SHLD(rd, rm) \
+  SH4_EMIT_BYTE(0x400D | (((rd) & 0xF) << 8) | (((rm) & 0xF) << 4))
+
+/* Instructions a constant logical shift takes with the fixed 16, 8, 2 and
+   1-bit shifts. */
+static inline u32 sh4_fixed_shift_steps(u32 amount)
+{
+  return (amount / 16) + ((amount % 16) / 8) + ((amount % 8) / 2) +
+   (amount % 2);
+}
+
+#define SH4_EMIT_FIXED_SHIFT(rd, amount, dir) \
+  do { \
+    u32 _left = (amount); \
+    while(_left >= 16) { SH4_EMIT_SH##dir##16(rd); _left -= 16; } \
+    if(_left >= 8) { SH4_EMIT_SH##dir##8(rd); _left -= 8; } \
+    while(_left >= 2) { SH4_EMIT_SH##dir##2(rd); _left -= 2; } \
+    if(_left != 0) SH4_EMIT_SH##dir##1(rd); \
+  } while(0)
+
+/* Constant shifts use the fixed shifts when those take at most two
+   instructions, otherwise mov #n,r1 and shld/shad, which is always two.
+   Emitting one instruction per bit cost up to 31. As in the other emitters,
+   r1 and r2 are scratch. */
 #define generate_shift_left(ireg, imm_val) \
-  do { u32 _sh = (imm_val); while(_sh--) SH4_EMIT_SHLL1(SH4_IREG(ireg)); } while(0)
+  do { \
+    u32 _sh = (imm_val); \
+    if(sh4_fixed_shift_steps(_sh) <= 2) { \
+      SH4_EMIT_FIXED_SHIFT(SH4_IREG(ireg), _sh, LL); \
+    } else { \
+      SH4_EMIT_MOVI(sh4_reg_r1, _sh); \
+      SH4_EMIT_SHLD(SH4_IREG(ireg), sh4_reg_r1); \
+    } \
+  } while(0)
 
 #define generate_shift_right(ireg, imm_val) \
-  do { u32 _sh = (imm_val); while(_sh--) SH4_EMIT_SHLR1(SH4_IREG(ireg)); } while(0)
+  do { \
+    u32 _sh = (imm_val); \
+    if(sh4_fixed_shift_steps(_sh) <= 2) { \
+      SH4_EMIT_FIXED_SHIFT(SH4_IREG(ireg), _sh, LR); \
+    } else { \
+      SH4_EMIT_MOVI(sh4_reg_r1, 0 - _sh); \
+      SH4_EMIT_SHLD(SH4_IREG(ireg), sh4_reg_r1); \
+    } \
+  } while(0)
 
 #define generate_shift_right_arithmetic(ireg, imm_val) \
-  do { u32 _sh = (imm_val); while(_sh--) SH4_EMIT_SHAR1(SH4_IREG(ireg)); } while(0)
+  do { \
+    u32 _sh = (imm_val); \
+    if(_sh <= 2) { \
+      while(_sh--) SH4_EMIT_SHAR1(SH4_IREG(ireg)); \
+    } else { \
+      SH4_EMIT_MOVI(sh4_reg_r1, 0 - _sh); \
+      SH4_EMIT_SHAD(SH4_IREG(ireg), sh4_reg_r1); \
+    } \
+  } while(0)
 
+/* Short rotations rotate one bit at a time in the nearer direction; the
+   rest combine a right and a left shift in six instructions. */
 #define generate_rotate_right(ireg, imm_val) \
-  do { u32 _sh = (imm_val); while(_sh--) SH4_EMIT_ROTR1(SH4_IREG(ireg)); } while(0)
+  do { \
+    u32 _sh = (imm_val) & 31; \
+    if(_sh <= 3) { \
+      while(_sh--) SH4_EMIT_ROTR1(SH4_IREG(ireg)); \
+    } else if(_sh >= 29) { \
+      _sh = 32 - _sh; \
+      while(_sh--) SH4_EMIT_ROTL1(SH4_IREG(ireg)); \
+    } else { \
+      SH4_EMIT_MOV(sh4_reg_r2, SH4_IREG(ireg)); \
+      SH4_EMIT_MOVI(sh4_reg_r1, 0 - _sh); \
+      SH4_EMIT_SHLD(SH4_IREG(ireg), sh4_reg_r1); \
+      SH4_EMIT_MOVI(sh4_reg_r1, 32 - _sh); \
+      SH4_EMIT_SHLD(sh4_reg_r2, sh4_reg_r1); \
+      SH4_EMIT_OR(SH4_IREG(ireg), SH4_IREG(ireg), sh4_reg_r2); \
+    } \
+  } while(0)
 
 #define get_shift_imm() \
   u32 shift = (opcode >> 7) & 0x1F
