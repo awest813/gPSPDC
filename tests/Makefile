@@ -23,6 +23,7 @@ test: sh4_helpers_behavior_test phase1_helpers_test sh4_emit_encoding_test sh4_i
 	./phase9_stability_test
 	./phase10_external_validation_test
 	$(PYTHON) save_io_test.py --cc "$(CC)"
+	$(PYTHON) audio_callback_test.py --cc "$(CC)"
 
 phase1_helpers_test: phase1_helpers_test.c
 	$(CC) $(CFLAGS) -o $@ $<

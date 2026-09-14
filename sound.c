@@ -556,14 +556,28 @@ void update_gbc_sound(u32 cpu_ticks)
 
   address16(io_registers, 0x84) = sound_status;
 
-  SDL_CondSignal(sound_cv);
-
-  SDL_UnlockMutex(sound_mutex);
-
   gbc_sound_last_cpu_ticks = cpu_ticks;
+  /* Publish completed samples before waking the consumer or dropping its lock. */
   gbc_sound_buffer_index =
    (gbc_sound_buffer_index + (buffer_ticks * 2)) % BUFFER_SIZE;
+
+  SDL_CondSignal(sound_cv);
+  SDL_UnlockMutex(sound_mutex);
 }
+
+#ifdef _arch_dreamcast
+/* About 3 ms at 22050 Hz. Keep the fade across callbacks so an empty ring
+   cannot restart the last sample, and preserve left/right independently. */
+#define SOUND_UNDERRUN_FADE_FRAMES 64
+static s16 sound_last_output[2];
+static u32 sound_fade_remaining;
+
+static void sound_reset_output(void)
+{
+  sound_last_output[0] = sound_last_output[1] = 0;
+  sound_fade_remaining = 0;
+}
+#endif
 
 #define sound_copy_normal()                                                   \
   current_sample = source[i]                                                  \
@@ -579,7 +593,7 @@ void update_gbc_sound(u32 cpu_ticks)
     if(current_sample < -2048)                                                \
       current_sample = -2048;                                                 \
                                                                               \
-    stream_base[i] = current_sample << 4;                                     \
+    stream_base[i] = (s16)(current_sample * 16);                              \
     source[i] = 0;                                                            \
   }                                                                           \
 
@@ -594,52 +608,99 @@ void update_gbc_sound(u32 cpu_ticks)
 
 void sound_callback(void *userdata, Uint8 *stream, int length)
 {
-  u32 sample_length = length / 2;
+  u32 sample_length;
+  u32 copy_length;
   u32 _length;
   u32 i;
   s16 *stream_base = (s16 *)stream;
   s16 *source;
   s32 current_sample;
 
+  (void)userdata;
+  if(length <= 0)
+    return;
+
+  /* SDL requests signed 16-bit stereo. Only consume complete frames. */
+  sample_length = ((u32)length / sizeof(s16)) & ~1U;
+  memset(stream, 0, length);
+
   SDL_LockMutex(sound_mutex);
 
-  while(((gbc_sound_buffer_index - sound_buffer_base) % BUFFER_SIZE) < length)
+#ifdef _arch_dreamcast
+  /* AICA needs this buffer on time even when emulation is below full speed.
+     Leave unproduced ring slots alone: direct sound may already be mixing
+     into them, ahead of the completed GBC write position. */
+  copy_length = (gbc_sound_buffer_index - sound_buffer_base) % BUFFER_SIZE;
+  copy_length &= ~1U;
+  if(copy_length > sample_length)
+    copy_length = sample_length;
+#else
+  while(((gbc_sound_buffer_index - sound_buffer_base) % BUFFER_SIZE) < sample_length)
   {
     SDL_CondWait(sound_cv, sound_mutex);
   }
+  copy_length = sample_length;
+#endif
+
+  length = copy_length * sizeof(s16);
 
   if(global_enable_audio)
   {
-    if((sound_buffer_base + sample_length) >= BUFFER_SIZE)
+    if((sound_buffer_base + copy_length) >= BUFFER_SIZE)
     {
       u32 partial_length = (BUFFER_SIZE - sound_buffer_base) * 2;
       sound_copy(sound_buffer_base, partial_length, normal);
-      source = (s16 *)sound_buffer;
+      stream_base += partial_length / sizeof(s16);
       sound_copy(0, length - partial_length, normal);
       sound_buffer_base = (length - partial_length) / 2;
     }
     else
     {
       sound_copy(sound_buffer_base, length, normal);
-      sound_buffer_base += sample_length;
+      sound_buffer_base += copy_length;
     }
   }
   else
   {
-    if((sound_buffer_base + sample_length) >= BUFFER_SIZE)
+    if((sound_buffer_base + copy_length) >= BUFFER_SIZE)
     {
       u32 partial_length = (BUFFER_SIZE - sound_buffer_base) * 2;
       sound_copy_null(sound_buffer_base, partial_length);
-      source = (s16 *)sound_buffer;
+      stream_base += partial_length / sizeof(s16);
       sound_copy_null(0, length - partial_length);
       sound_buffer_base = (length - partial_length) / 2;
     }
     else
     {
       sound_copy_null(sound_buffer_base, length);
-      sound_buffer_base += sample_length;
+      sound_buffer_base += copy_length;
     }
   }
+
+#ifdef _arch_dreamcast
+  stream_base = (s16 *)stream;
+  if(!global_enable_audio)
+  {
+    sound_reset_output();
+  }
+  else
+  {
+    if(copy_length >= 2)
+    {
+      sound_last_output[0] = stream_base[copy_length - 2];
+      sound_last_output[1] = stream_base[copy_length - 1];
+      sound_fade_remaining = SOUND_UNDERRUN_FADE_FRAMES;
+    }
+    for(i = copy_length; i < sample_length && sound_fade_remaining; i += 2)
+    {
+      --sound_fade_remaining;
+      stream_base[i] = (s16)((s32)sound_last_output[0] *
+       (s32)sound_fade_remaining / SOUND_UNDERRUN_FADE_FRAMES);
+      stream_base[i + 1] = (s16)((s32)sound_last_output[1] *
+       (s32)sound_fade_remaining / SOUND_UNDERRUN_FADE_FRAMES);
+    }
+  }
+#endif
 
   SDL_CondSignal(sound_cv);
   SDL_UnlockMutex(sound_mutex);
@@ -691,6 +752,9 @@ void reset_sound()
   sound_buffer_base = 0;
   sound_last_cpu_ticks = 0;
   memset(sound_buffer, 0, sizeof(sound_buffer));
+#ifdef _arch_dreamcast
+  sound_reset_output();
+#endif
 
   for(i = 0; i < 2; i++, ds++)
   {

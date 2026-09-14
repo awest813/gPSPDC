@@ -1,19 +1,21 @@
 # Agent handoff: dynarec, ROM loading, performance
 
 Session date: 2026-09-13. Branch `claude/dynarec-rom-loading-cfa987`, based on
-`b9cb1e1`. Committed in four commits; `git log b9cb1e1..` lists
-them. No pull request is open yet.
+`b9cb1e1`. The original work is committed in four commits through `cd2ed67`
+and pushed to `origin/claude/dynarec-rom-loading-cfa987`. The audio follow-up
+below is included in the subsequent audio-fix commit. No pull request has
+been opened by this task.
 
 ## Where things stand
 
 | Check | Result |
 |---|---|
-| Host C tests (`scripts/host-tests-msvc.bat`, MSVC 2022) | 13 of 13 pass. The SH-4 helper suite runs 159,892 checks. `save_io_test.py --cc cl` also passes; it compiles extracted save/config functions, not ROM paging code. |
+| Host tests | All 13 C suites, save/config fault injection, and the new audio callback tests pass under GCC and MSVC. Audio also passes GCC AddressSanitizer and UndefinedBehaviorSanitizer. Both test runners include the Python tests. The save test compiles extracted save/config functions, not ROM paging code. |
 | New tests fail when their fix is reverted | Confirmed for the SWI LR fix (2 failures), STM SMC dispatch (6) and the store tag check (3) |
 | Dreamcast cross-build (CI container) | Clean. Only pre-existing unused-variable warnings. |
 | Super Puzzle Fighter II in Flycast 2.7, stock 16 MB | Runs with every change applied |
 | Grand Theft Auto Advance | **Still crashes**: [GTA_BAD_JUMP_LOG_2026-09-13.md](GTA_BAD_JUMP_LOG_2026-09-13.md), ROADMAP B10 |
-| Audio | **Reported bad by the user; not fixed.** Findings below. |
+| Audio | Wrap corruption and callback sample waits addressed; behavioral tests and Dreamcast cross-build pass. Listening in Flycast/hardware is still pending; see P1. |
 
 ### Frame rate, Super Puzzle Fighter II attract mode
 
@@ -218,7 +220,24 @@ Flycast.
 
 ### P1. Audio (user-reported)
 
-Nothing here is fixed. All four findings come from code reading.
+The first two findings now have fixes in `sound.c`, with behavioral coverage in
+`tests/audio_callback_test.py`. This test compiles the actual callback and copy
+macros with SDL shims in both Dreamcast and desktop modes. It covers wrap and
+exact-boundary copies, mute, clipping, stereo ordering, empty/partial buffers,
+a fade spanning callbacks, resumption, and preservation of unconsumed ring
+slots. The Dreamcast shim rejects any condition-variable wait. Both variants
+pass under MSVC and GCC, including GCC address/undefined-behavior sanitizers.
+Temporary mutations confirmed the tests reject the old wrap destination and
+desktop byte/sample wait bugs, consumption beyond available samples, and a
+fade that restarts every callback.
+
+The Dreamcast ELF also cross-builds with the existing toolchain. No listening
+test has been performed for this follow-up, so audible improvement remains to
+be verified. AICA backend and timer-lock changes are still proposals.
+The attempted Flycast listening check was interrupted by the user before
+gameplay or audio output could be verified; it is not a completed test.
+A local ignored disc image, `dc/audio-fix-spf.cdi`, packages this build with
+the user's Super Puzzle Fighter II assets for the listening check.
 
 1. **Output corruption at every ring-buffer wrap.** In `sound_callback`
    (`sound.c`), the wrap branch calls `sound_copy` twice. Both calls write
@@ -228,8 +247,9 @@ Nothing here is fixed. All four findings come from code reading.
    - *When:* every time `sound_buffer_base` wraps `BUFFER_SIZE` (32,768
      values), roughly every 0.74 s at 22,050 Hz stereo. Expect a periodic
      click.
-   - *How:* advance the destination by the first half's sample count before
-     the second copy, in both branches.
+   - *Fixed:* advance the destination by the first half's sample count before
+     the second copy, in both branches. Sample scaling now uses multiplication
+     after clipping, avoiding a signed left shift of negative samples.
 2. **The callback blocks.** It waits on `sound_cv` until the emulator has
    produced a buffer. Its check compares the buffered count against `length`
    in bytes, so it waits for twice what it needs.
@@ -237,10 +257,17 @@ Nothing here is fixed. All four findings come from code reading.
      ring in AICA RAM, and the AICA loops the old half while the callback
      waits. Below full speed, which is always today, that is a repeating
      buzz.
-   - *How:* on Dreamcast, never wait. Copy what is buffered. Pad the rest
-     with a short fade from the last sample. Never move `sound_buffer_base`
-     past `gbc_sound_buffer_index`. Keep the producer-side throttle in
-     `update_gbc_sound`, which waits above 1.5x `audio_buffer_size`.
+   - *Fixed:* on Dreamcast, do not wait for the producer. Copy only complete
+     stereo frames already buffered. Fade each channel's last output to zero
+     over 64 frames (about 2.9 ms at 22,050 Hz), keeping fade progress across
+     callbacks, then fill silence. Mute/reset clear the fade. Never move
+     `sound_buffer_base` past `gbc_sound_buffer_index` or clear future samples
+     that direct sound may already be mixing. The callback still takes the
+     existing mutex; this is not a lock-free implementation.
+   - Desktop retains its wait, comparing sample counts consistently.
+   - The producer now publishes `gbc_sound_buffer_index` while holding the
+     mutex and before signaling. Previously publication happened after unlock.
+     Its throttle above 1.5x `audio_buffer_size` is preserved.
 3. **Upload cost.** `SDL_dcaudio` uploads one stereo sample at a time
    (`spu_memload_stereo16`). Each write does a G2 FIFO wait and disables and
    restores interrupts. It busy-waits on the AICA position with `thd_pass`.
@@ -250,8 +277,11 @@ Nothing here is fixed. All four findings come from code reading.
 4. **Minor.** `sound_timer` locks `sound_mutex` on every direct-sound timer
    tick.
 
-Verify by ear in Flycast. Frameskip (F12, below) changes how audio behaves
-when the emulator is slow.
+Next, verify by ear in Flycast with fast-forward off: listen through repeated
+ring wraps, slow gameplay, mute/unmute, and reset. Compare with `cd2ed67` at
+the same game position. The fade avoids replaying an old output buffer but
+cannot restore missing emulation time; gaps at low frame rates can remain.
+Frameskip (F12, below) changes how audio behaves when the emulator is slow.
 
 ### P2. Performance
 
@@ -304,7 +334,7 @@ Two hypotheses are ruled out: a stale LR_svc, and stale translations from STM.
 
 ### P5. Review and merge
 
-The work is committed in four commits:
+The original work is committed and pushed in four commits through `cd2ed67`:
 
 1. ROM paging empty-slot fix (`memory.c`).
 2. Dynarec correctness, the fatal-error report and F1. They share
@@ -312,9 +342,11 @@ The work is committed in four commits:
 3. F4 constant shifts, with the simulator and encoding tests.
 4. Documentation and scripts.
 
-The host tests have not been run with gcc, which is what CI uses
-(`make -C tests test`, including `save_io_test.py`); MSVC passed all 13 host C suites and the save/config fault-injection test. Check
-CI on the pushed branch before opening a pull request against `dreamcast`.
+The audio follow-up is included in the subsequent audio-fix commit.
+GCC and MSVC host suites pass locally,
+including save/config and audio callback tests; the Dreamcast cross-build
+also passes. Check hosted CI after publishing the audio follow-up and before
+opening a pull request against `dreamcast`.
 
 ## How to build, run and measure
 

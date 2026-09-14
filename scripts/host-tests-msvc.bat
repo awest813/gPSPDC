@@ -1,9 +1,11 @@
 @echo off
-rem Build and run the 13 host C test programs with MSVC, for machines without
-rem gcc and make (tests\Makefile is the canonical runner). Set VCVARS to point
+rem Build and run the 13 host C suites plus save/config and audio tests with MSVC,
+rem for machines without gcc and make (tests\Makefile is the canonical runner).
+rem Set VCVARS to point
 rem at a different vcvars64.bat. Binaries go to %TEMP%\gpspdc-host-tests.
-rem Run save_io_test.py separately with Python and --cc cl in an MSVC environment.
+rem Python 3 is required for the extracted-source tests. Override PYTHON if needed.
 setlocal
+if "%PYTHON%"=="" set "PYTHON=python"
 if "%VCVARS%"=="" set "VCVARS=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 call "%VCVARS%" >nul
 set "OUT=%TEMP%\gpspdc-host-tests"
@@ -24,6 +26,15 @@ for %%T in (sh4_helpers_behavior_test phase1_helpers_test sh4_emit_encoding_test
     ) else (
       echo pass %%T
     )
+  )
+)
+for %%T in (save_io_test audio_callback_test) do (
+  "%PYTHON%" %%T.py --cc cl >"%OUT%\%%T.run.log" 2>&1
+  if errorlevel 1 (
+    echo FAIL %%T - see %OUT%\%%T.run.log
+    set FAIL=1
+  ) else (
+    echo pass %%T
   )
 )
 echo overall_fail=%FAIL%
