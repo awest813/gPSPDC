@@ -270,6 +270,18 @@ This is also what makes the baseline readable: presented frames equal emulated
 frames, so Flycast's counter is the GBA frame rate. Any frameskip work should
 keep a way to read both numbers.
 
+**Status, 2026-09-14: implemented.** The change adds a microsecond clock,
+deadline-based pacing, and an optional on-screen counter
+(`-DGPSP_DC_SHOW_FPS`) that reports emulated and drawn frames separately.
+Results on Super Puzzle Fighter II:
+
+- Menus: emulation rose from about 47% of full speed to 63–65%.
+- Match: emulation reached 35%.
+- Drawing: only 4 to 9 frames per second in both.
+
+Frameskip is no substitute for dynarec speed on this title. Details are in
+[AGENTHANDOFF.md](AGENTHANDOFF.md) §9.
+
 ### F13 — Grand Theft Auto Advance stops with a recompiler fatal error
 
 The 16 MB title boots and reaches its title sequence, then halts:

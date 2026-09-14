@@ -28,7 +28,7 @@ for %%T in (sh4_helpers_behavior_test phase1_helpers_test sh4_emit_encoding_test
     )
   )
 )
-for %%T in (save_io_test audio_callback_test) do (
+for %%T in (save_io_test audio_callback_test frame_pacing_test) do (
   "%PYTHON%" %%T.py --cc cl >"%OUT%\%%T.run.log" 2>&1
   if errorlevel 1 (
     echo FAIL %%T - see %OUT%\%%T.run.log

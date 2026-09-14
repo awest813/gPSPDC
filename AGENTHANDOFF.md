@@ -3,14 +3,15 @@
 Session date: 2026-09-13. Branch `claude/dynarec-rom-loading-cfa987`, based on
 `b9cb1e1`. The original work is committed in four commits through `cd2ed67`
 and pushed to `origin/claude/dynarec-rom-loading-cfa987`. The audio follow-up
-below is included in the subsequent audio-fix commit. No pull request has
+below is included in the subsequent audio-fix commit. Frame pacing and auto
+frameskip (§9, 2026-09-14) follow in their own commit. No pull request has
 been opened by this task.
 
 ## Where things stand
 
 | Check | Result |
 |---|---|
-| Host tests | All 13 C suites, save/config fault injection, and the new audio callback tests pass under GCC and MSVC. Audio also passes GCC AddressSanitizer and UndefinedBehaviorSanitizer. Both test runners include the Python tests. The save test compiles extracted save/config functions, not ROM paging code. |
+| Host tests | All 13 C suites and the save/config, audio callback and frame pacing tests pass under MSVC. Hosted CI (GCC) passed on every pushed commit through `72a35c0`; the frame pacing test has not yet run under GCC. Audio also passed GCC AddressSanitizer and UndefinedBehaviorSanitizer. Both test runners include the Python tests. The save test compiles extracted save/config functions, not ROM paging code. |
 | New tests fail when their fix is reverted | Confirmed for the SWI LR fix (2 failures), STM SMC dispatch (6) and the store tag check (3) |
 | Dreamcast cross-build (CI container) | Clean. Only pre-existing unused-variable warnings. |
 | Super Puzzle Fighter II in Flycast 2.7, stock 16 MB | Runs with every change applied |
@@ -216,6 +217,75 @@ Flycast.
 - **`scripts/host-tests-msvc.bat`:** host tests without gcc or make.
 - **`GTA_BAD_JUMP_LOG_2026-09-13.md` and ROADMAP row B10.**
 
+### 9. Dreamcast frame pacing and auto frameskip (F12)
+
+Files: `main.c`, `tests/frame_pacing_test.py`, `tests/Makefile`,
+`scripts/host-tests-msvc.bat`.
+
+**Why.** Automatic frameskip was the default but did nothing on Dreamcast: the
+non-PSP `synchronize()` honored only manual frameskip. It also paced frames
+with a 15 ms delay, though a GBA frame lasts 16.743 ms, measured with
+`SDL_GetTicks()`, which counts whole milliseconds.
+
+**How.**
+
+- `dc_frame_pace()` keeps a real-time deadline that advances one GBA frame
+  (16,743 µs) per emulated frame.
+  - Ahead of the deadline, `synchronize()` waits.
+  - At least a frame behind, auto frameskip skips drawing the next frame, at
+    most `frameskip_value` frames in a row.
+  - More than eight frames behind, the backlog is dropped rather than skipped
+    through.
+  - Fast forward draws one frame in five. Manual frameskip and "off" behave
+    as before.
+- Skipping saves only drawing: scanline rendering and the flip. The CPU,
+  timers and sound still run every frame.
+- `get_ticks_us()` on Dreamcast reads KOS `timer_us_gettime64()`.
+- Building with `GPSP_EXTRA_CFLAGS=-DGPSP_DC_SHOW_FPS` draws
+  `emu NN.N fps NN%  drawn NN.N fps` below the GBA picture, updated every
+  second. make does not track flags, so touch `main.c` when switching.
+
+**Tests.** `frame_pacing_test.py` compiles `dc_frame_pace()` from `main.c` and
+simulates per-frame costs:
+
+- full speed stays exactly on schedule without skipping;
+- "off" never skips;
+- 12 ms of emulation plus 8 ms of drawing holds real time while drawing 55% to
+  65% of frames;
+- a 30 ms emulation cost skips exactly four in a row and keeps lag bounded;
+- a one-second stall causes at most one skipped frame;
+- fast forward draws one frame in five;
+- manual frameskip 2 skips two frames in three.
+
+Each of these reverted breaks the test: the skip, the backlog reset, the skip
+cap.
+
+**Measured.** Super Puzzle Fighter II attract mode, Flycast 2.7, stock 16 MB,
+automatic frameskip with value 4. Emulated and drawn rates come from the
+on-screen counter.
+
+| Moment | Emulated | Share of full speed | Drawn |
+|---|---|---|---|
+| Menus, 30 s | 37.4 fps | 63% | 8.8 fps |
+| Match, 60 s | 21.2 fps | 35% | 3.8 fps |
+| Score screen, 90 s | 38.6 fps | 65% | 7.9 fps |
+
+Flycast's counter, which counts presented frames, read 5.9 to 11.0 over the
+run (mean 8.2). Drawing every frame, the previous build ran about 28 fps in
+menus (47%).
+
+From those two menu figures, a frame costs about 24.5 ms to emulate and 11 ms
+to draw. During a match emulation alone takes about 45 ms. **Frameskip cannot
+reach full speed on this title; the dynarec is the bottleneck.** In heavy
+scenes it buys about 20% more speed for a four- to five-fold drop in drawn
+frames.
+
+**Open decision.** gpSP's default, automatic with value 4, now takes effect.
+Games look choppier than before in exchange for speed. Two alternatives are
+each a one-line change in `main.c`: a lower default value (1 draws at least
+every other frame), or frameskip off by default. Users can change both in the
+menu.
+
 ## What needs work next, in priority order
 
 ### P1. Audio (user-reported)
@@ -285,7 +355,9 @@ Frameskip (F12, below) changes how audio behaves when the emulator is slow.
 
 ### P2. Performance
 
-The plan is `DC_PERFORMANCE_PLAN_2026-09-10.md`.
+The plan is `DC_PERFORMANCE_PLAN_2026-09-10.md`. The frameskip measurements
+in §9 show that emulation, not drawing, dominates the frame, so dynarec work
+comes first.
 
 - **Judge F4 properly.** Wall-clock samples could not separate its speed from
   attract-mode position (see the table note). Measure a fixed number of
@@ -295,13 +367,14 @@ The plan is `DC_PERFORMANCE_PLAN_2026-09-10.md`.
   load/store displacement, so each access takes three instructions.
   - *How:* pin a second base register at `&reg[16]` (r8 to r11 are
     callee-saved and unused) and set it in `sh4_dispatch_block`. It is cheap.
-- **F12.** Automatic frameskip is the default, but on the non-PSP path
-  `synchronize()` only honors manual frameskip. Wiring it helps both
-  smoothness and audio. It also changes what Flycast's counter measures, so
-  land it with an on-target counter.
-- **Phase 0.** Add an on-target frame and time overlay. Flycast's counter is
-  the only instrument today: it cannot run on hardware and fast-forward breaks
-  it.
+  - *Scope:* 34 flag or CPSR accesses in `dc/sh4_instr.inc`. The emitter uses
+    none of r8 to r11.
+- **F12 is done** (§9). Its default setting is an open decision.
+- **Phase 0, remaining.** The on-screen counter exists behind
+  `GPSP_DC_SHOW_FPS` (§9). Still missing: a menu toggle; an unthrottled
+  benchmark that runs a fixed number of frames from a save state; translation
+  counters. Only the fixed-frame benchmark can judge F4 and F5, because
+  wall-clock samples depend on where the attract sequence has reached.
 - **Larger items:**
   - F3: literal pool, the biggest code-size lever. Every helper call currently
     spends up to 14 instructions building an address.

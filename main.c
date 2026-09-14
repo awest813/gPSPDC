@@ -18,6 +18,9 @@
  */
 
 #include "common.h"
+#ifdef _arch_dreamcast
+#include <arch/timer.h>
+#endif
 #include "sound.h"
 #include "cpu.h"
 #include "video.h"
@@ -876,6 +879,146 @@ void synchronize()
 */
 }
 
+#elif defined(_arch_dreamcast)
+
+/* One GBA frame lasts 280,896 cycles of the 16.777216 MHz clock: 1/59.7275 s. */
+#define GBA_FRAME_US 16743
+/* A lag this long cannot be recovered by skipping frames, so forget it. */
+#define GBA_MAX_LAG_US (GBA_FRAME_US * 8)
+
+static u64 frame_deadline_us = 0;
+static u32 frames_skipped_in_row = 0;
+
+/* Called once per emulated frame with the current real time. Advances the
+   real-time deadline by one GBA frame, decides whether the next frame is
+   drawn, and returns how many microseconds to wait to stay on schedule.
+   Skipping saves only drawing; the CPU, timers and sound still run every
+   frame. Auto frameskip skips while emulation is at least a frame behind real
+   time, drawing at least one frame in every frameskip_value + 1. */
+static u32 dc_frame_pace(u64 now_us)
+{
+  u32 skip_limit = frameskip_value;
+  u32 wait_us = 0;
+  s64 lag_us;
+
+  if(frame_deadline_us == 0)
+    frame_deadline_us = now_us;
+
+  frame_deadline_us += GBA_FRAME_US;
+  lag_us = (s64)(now_us - frame_deadline_us);
+
+  if(!synchronize_flag)
+  {
+    /* Fast forward: no pacing, and auto frameskip draws one frame in five. */
+    frame_deadline_us = now_us;
+    lag_us = GBA_FRAME_US;
+    skip_limit = 4;
+  }
+  else if(lag_us < 0)
+  {
+    wait_us = (u32)(-lag_us);
+  }
+  else if(lag_us > GBA_MAX_LAG_US)
+  {
+    frame_deadline_us = now_us;
+  }
+
+  skip_next_frame = 0;
+
+  if(current_frameskip_type == auto_frameskip)
+  {
+    if((lag_us >= GBA_FRAME_US) && (frames_skipped_in_row < skip_limit))
+    {
+      skip_next_frame = 1;
+      frames_skipped_in_row++;
+    }
+    else
+    {
+      frames_skipped_in_row = 0;
+    }
+  }
+  else if(current_frameskip_type == manual_frameskip)
+  {
+    frameskip_counter = (frameskip_counter + 1) % (frameskip_value + 1);
+
+    if(random_skip)
+    {
+      if(frameskip_counter != (rand() % (frameskip_value + 1)))
+        skip_next_frame = 1;
+    }
+    else if(frameskip_counter)
+    {
+      skip_next_frame = 1;
+    }
+  }
+
+  return wait_us;
+}
+
+#ifdef GPSP_DC_SHOW_FPS
+/* Counter below the GBA picture, for measuring without an external emulator:
+   emulated frames per second, as a share of full speed, and frames drawn.
+   Build with GPSP_EXTRA_CFLAGS=-DGPSP_DC_SHOW_FPS. */
+static u64 perf_window_us = 0;
+static u32 perf_emulated_frames = 0;
+static u32 perf_drawn_frames = 0;
+static char perf_text[64] = "";
+
+static void dc_perf_count_frame(u64 now_us)
+{
+  u64 elapsed_us;
+
+  perf_emulated_frames++;
+  /* skip_next_frame still holds the decision the finished frame ran with. */
+  if(!skip_next_frame)
+    perf_drawn_frames++;
+
+  if(perf_window_us == 0)
+    perf_window_us = now_us;
+
+  elapsed_us = now_us - perf_window_us;
+  if(elapsed_us >= 1000000)
+  {
+    u32 emulated_x10 =
+     (u32)((perf_emulated_frames * 10000000ULL) / elapsed_us);
+    u32 drawn_x10 = (u32)((perf_drawn_frames * 10000000ULL) / elapsed_us);
+
+    sprintf(perf_text, "emu %2u.%u fps %3u%%  drawn %2u.%u fps",
+     emulated_x10 / 10, emulated_x10 % 10,
+     (emulated_x10 * 1000 + 2986) / 5973, drawn_x10 / 10, drawn_x10 % 10);
+
+    perf_window_us = now_us;
+    perf_emulated_frames = 0;
+    perf_drawn_frames = 0;
+  }
+}
+#endif
+
+void synchronize()
+{
+  u64 now_us;
+  u32 wait_us;
+
+  get_ticks_us(&now_us);
+
+#ifdef GPSP_DC_SHOW_FPS
+  dc_perf_count_frame(now_us);
+#endif
+
+  wait_us = dc_frame_pace(now_us);
+  if(wait_us >= 1000)
+    delay_us(wait_us);
+
+  if(synchronize_flag == 0)
+    print_string("--FF--", 0xFFFF, 0x000, 0, 0);
+
+#ifdef GPSP_DC_SHOW_FPS
+  /* Only frames about to be presented need the text. */
+  if(!skip_next_frame && perf_text[0])
+    print_string(perf_text, 0xFFFF, 0x0000, 0, 162);
+#endif
+}
+
 #else
 
 u32 ticks_needed_total = 0;
@@ -929,14 +1072,9 @@ void synchronize()
   if(synchronize_flag == 0)
     print_string("--FF--", 0xFFFF, 0x000, 0, 0);
 
-#ifndef _arch_dreamcast
-  /* The Dreamcast has no window caption; skip the per-frame float format. */
   sprintf(char_buffer, "gpSP: %.1fms %.1ffps", us_needed / 1000.0,
    1000000.0 / us_needed);
   SDL_WM_SetCaption(char_buffer, "gpSP");
-#else
-  (void)char_buffer;
-#endif
 
 /*
     sprintf(char_buffer, "%02d %02d %06d %07d", frameskip, (u32)ms_needed,
@@ -1014,7 +1152,12 @@ void delay_us(u32 us_count)
 
 void get_ticks_us(u64 *ticks_return)
 {
+#ifdef _arch_dreamcast
+  /* SDL_GetTicks counts whole milliseconds; frame pacing needs finer time. */
+  *ticks_return = timer_us_gettime64();
+#else
   *ticks_return = (SDL_GetTicks() * 1000);
+#endif
 }
 
 #endif
