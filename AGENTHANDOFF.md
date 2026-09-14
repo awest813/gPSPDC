@@ -4,16 +4,18 @@ Session date: 2026-09-13. Branch `claude/dynarec-rom-loading-cfa987`, based on
 `b9cb1e1`. The original work is committed in four commits through `cd2ed67`
 and pushed to `origin/claude/dynarec-rom-loading-cfa987`. The audio follow-up
 below is included in the subsequent audio-fix commit. Frame pacing and auto
-frameskip (§9, 2026-09-14) follow in their own commit. No pull request has
-been opened by this task.
+frameskip (§9, 2026-09-14) follow in their own commit. Three more commits
+followed on 2026-09-14: header dependencies for the Dreamcast build, a
+fixed-frame benchmark mode, and emission changes (§10 to §12). No pull
+request has been opened by this task.
 
 ## Where things stand
 
 | Check | Result |
 |---|---|
-| Host tests | All 13 C suites and the save/config, audio callback and frame pacing tests pass under MSVC. Hosted CI (GCC) passed on every pushed commit through `72a35c0`; the frame pacing test has not yet run under GCC. Audio also passed GCC AddressSanitizer and UndefinedBehaviorSanitizer. Both test runners include the Python tests. The save test compiles extracted save/config functions, not ROM paging code. |
+| Host tests | All 13 C suites and the save/config, audio callback and frame pacing tests pass under MSVC. Hosted CI (GCC) passed on every pushed commit through `19c52f1`, including the frame pacing test. Audio also passed GCC AddressSanitizer and UndefinedBehaviorSanitizer. Both test runners include the Python tests. The save test compiles extracted save/config functions, not ROM paging code. |
 | New tests fail when their fix is reverted | Confirmed for the SWI LR fix (2 failures), STM SMC dispatch (6) and the store tag check (3) |
-| Dreamcast cross-build (CI container) | Clean. Only pre-existing unused-variable warnings. |
+| Dreamcast cross-build (CI container) | Clean from scratch. Header dependencies are tracked since `555016c`. Only pre-existing warnings. |
 | Super Puzzle Fighter II in Flycast 2.7, stock 16 MB | Runs with every change applied |
 | Grand Theft Auto Advance | **Still crashes**: [GTA_BAD_JUMP_LOG_2026-09-13.md](GTA_BAD_JUMP_LOG_2026-09-13.md), ROADMAP B10 |
 | Audio | Wrap corruption and callback sample waits addressed; behavioral tests and Dreamcast cross-build pass. Listening in Flycast/hardware is still pending; see P1. |
@@ -43,8 +45,13 @@ Judging F4 needs a fixed emulated-frame benchmark (Phase 0), not wall-clock
 samples.
 
 An earlier F4 run was discarded. Flycast's fast-forward (Tab; the counter
-shows `>>`) was on, and the counter read 34 to 250. Both F4 runs rendered the
-game correctly.
+shows `>>`) was on, and the counter read 34 to 250.
+
+**Correction, 2026-09-14: none of the builds in this table contained F4.**
+`dc/Makefile` had no header dependencies, so editing `dc/sh4_emit.h` never
+rebuilt `cpu_threaded.o`, and every run above used the recompiler as of F1.
+The "+ F4" row reflects sampling position, not F4. F4 first ran on target in
+the fixed-frame benchmark (§10).
 
 ## What changed, and why
 
@@ -203,8 +210,10 @@ Files: `dc/sh4_emit.h`, `tests/sh4_emit_simulator.h`,
 - The encoding table now includes the new opcodes.
 
 **Risk.** The simulator's `shad`/`shld` semantics come from the SH-4
-instruction description, not from hardware. Gameplay looked correct in
-Flycast.
+instruction description, not from hardware. The 2026-09-13 Flycast runs did
+not contain F4 (see the correction in the frame-rate section). Its first
+on-target runs, on 2026-09-14, rendered correctly through the benchmark span
+but measured slower than the stale build; see §10.
 
 ### 8. Smaller changes
 
@@ -272,7 +281,9 @@ on-screen counter.
 
 Flycast's counter, which counts presented frames, read 5.9 to 11.0 over the
 run (mean 8.2). Drawing every frame, the previous build ran about 28 fps in
-menus (47%).
+menus (47%). These runs also used the pre-F4 recompiler (see the correction
+in the frame-rate section). That changes the absolute figures, not the
+frameskip analysis.
 
 From those two menu figures, a frame costs about 24.5 ms to emulate and 11 ms
 to draw. During a match emulation alone takes about 45 ms. **Frameskip cannot
@@ -285,6 +296,104 @@ Games look choppier than before in exchange for speed. Two alternatives are
 each a one-line change in `main.c`: a lower default value (1 draws at least
 every other frame), or frameskip off by default. Users can change both in the
 menu.
+
+### 10. Fixed-frame benchmark
+
+File: `main.c` (commit `4d4941f`).
+
+**Why.** Wall-clock samples cannot compare builds. A faster build reaches the
+heavier parts of the attract sequence sooner, so its samples come from
+different scenes.
+
+**How.**
+
+- Build with `GPSP_EXTRA_CFLAGS=-DGPSP_DC_BENCHMARK -DGPSP_DC_SHOW_FPS`.
+- The build draws every frame, never waits, and times emulated frames 600 to
+  2400 after boot. The result appears below the picture as
+  `bench 600-2400: NN.NN fps, NNNNN ms`.
+- With no input, the attract sequence repeats exactly in emulated frames, so
+  the span is the same work in every build.
+- Timing uses the guest's own clock, so host load during a run does not
+  change the result.
+
+**Deterministic.** Two runs of the same Super Puzzle Fighter II disc both
+measured 66,137 ms. Differences of a few milliseconds between builds are real.
+
+**Results.** Super Puzzle Fighter II, Flycast 2.7, stock 16 MB. Every build is
+clean except the first row.
+
+| Build | Frames 600–2400 | fps |
+|---|---|---|
+| Stale objects: `19c52f1` sources, `cpu_threaded.o` from before F4 | 61,926 ms | 29.06 |
+| Clean `19c52f1`, which includes F4 | 66,137 ms | 27.21 |
+| Same disc, second run | 66,137 ms | 27.21 |
+| Clean `19c52f1` without F4 | 66,419 ms | 27.10 |
+| Clean `19c52f1` without the audio fix | not measured: the run was interrupted | |
+| Clean `19c52f1` + F5 flag base | 65,848 ms | 27.33 |
+| + F5 + F2 inline ALU | not measured: Flycast closed 69 s into the run | |
+| + F5 + F2 + helper call table (`42c08ea`) | 57,628 ms | 31.23 |
+
+**F4 is not the regression.** The clean build without F4 was slower
+(66,419 ms against 66,137 ms), so F4 is worth about 0.4%.
+
+**Unexplained: the stale-object build is about 7% faster than every clean
+build.** Its sources match the clean no-F4 build, including the audio fix:
+that build recompiled only `main.c`, so make considered `sound.o` newer than
+`sound.c`. `make clean` has since removed those objects, so the stale build
+cannot be reproduced. The remaining suspects are objects compiled on
+2026-09-13, one set possibly by another session with different flags.
+
+The run without the audio fix was interrupted and should be repeated: build
+HEAD with `sound.c` from `cd2ed67`, then compare it with the clean HEAD row.
+
+### 11. Emission: flag base, inline ALU, helper call table
+
+Files: `dc/sh4_emit.h`, `dc/sh4_instr.inc`, `dc/sh4_stub.c`, host tests
+(commit `42c08ea`).
+
+- **Flag base (F5).** The dispatcher points r8 at `&reg[16]`. The flags, CPSR,
+  CPU mode and dispatch state (`reg[16]` to `reg[31]`) then load and store in
+  one instruction instead of three.
+- **Inline ALU (F2).**
+  - Forms that set no flags are emitted inline, with the result in r0: ADD,
+    SUB, RSB, AND, ORR, EOR, BIC, MOV, MVN, ADC, SBC, RSC.
+  - The same applies to Thumb high-register ADD and MOV.
+  - ARM MOV no longer calls an identity helper.
+  - Flag-setting forms still call their helpers.
+- **Helper call table.**
+  - Helpers take slots in a 48-entry table reached from r9, r10 and r11,
+    which point at slots 0, 16 and 32.
+  - A call is `mov.l @(disp,Rn),r1; jsr @r1; nop`: three instructions instead
+    of up to 16.
+  - Slots are appended when a call is first emitted and are never reused. A
+    full table falls back to building the address.
+
+r8 to r11 are callee-saved under the SH-4 ABI, and the emitter never writes
+them. The dispatcher, which sets all four, is the only way into translated
+code.
+
+**Tests.**
+
+- The emitted-code simulator now executes register-relative loads and stores.
+- `test_executed_inline_alu` runs every inline sequence against the helper
+  definitions, over edge values and both carry states. It also checks that
+  only r0 to r2 change.
+- Encoding tests cover the flag window, plus the helper table's slots, reuse
+  and overflow.
+- Each of these mutations fails a test: broken SBC, broken RSB, a narrower
+  flag window, a wrong table base, no slot reuse, an unscaled table
+  displacement.
+
+**On target.** F5 completed the benchmark span with correct rendering.
+F2 and the helper call table completed the benchmark span with correct rendering, and the run continued through the attract sequence back to the title screen. Together they cut frames 600 to 2400 from 65,848 ms to 57,628 ms (12.5% less time; 27.33 to 31.23 fps). The split between them is unmeasured, because the F2-only run was interrupted.
+
+### 12. Header dependencies in the Dreamcast build
+
+Files: `dc/Makefile`, `.gitignore` (commit `555016c`).
+
+The build passes `-MMD -MP`, includes `$(OBJS:.o=.d)`, and removes the `.d`
+files on `make clean`. Before this, editing a header rebuilt nothing that
+included it; see the correction in the frame-rate section.
 
 ## What needs work next, in priority order
 
@@ -359,26 +468,19 @@ The plan is `DC_PERFORMANCE_PLAN_2026-09-10.md`. The frameskip measurements
 in §9 show that emulation, not drawing, dominates the frame, so dynarec work
 comes first.
 
-- **Judge F4 properly.** Wall-clock samples could not separate its speed from
-  attract-mode position (see the table note). Measure a fixed number of
-  emulated frames from a fixed starting point, which is Phase 0's benchmark
-  mode.
-- **F5.** `reg[16]` to `reg[20]` (the flags and CPSR) sit outside the 4-bit
-  load/store displacement, so each access takes three instructions.
-  - *How:* pin a second base register at `&reg[16]` (r8 to r11 are
-    callee-saved and unused) and set it in `sh4_dispatch_block`. It is cheap.
-  - *Scope:* 34 flag or CPSR accesses in `dc/sh4_instr.inc`. The emitter uses
-    none of r8 to r11.
+- **Explain F4's benchmark result** (§10). If the build without F4 is faster,
+  check whether Flycast implements `shad`/`shld` slowly before reverting
+  anything. Real hardware is the target.
+- **F5 is done** (§11).
 - **F12 is done** (§9). Its default setting is an open decision.
-- **Phase 0, remaining.** The on-screen counter exists behind
-  `GPSP_DC_SHOW_FPS` (§9). Still missing: a menu toggle; an unthrottled
-  benchmark that runs a fixed number of frames from a save state; translation
-  counters. Only the fixed-frame benchmark can judge F4 and F5, because
-  wall-clock samples depend on where the attract sequence has reached.
+- **Phase 0, remaining.** The on-screen counter (§9) and the fixed-frame
+  benchmark (§10) exist. Still missing: a menu toggle and translation
+  counters.
 - **Larger items:**
-  - F3: literal pool, the biggest code-size lever. Every helper call currently
-    spends up to 14 instructions building an address.
-  - F2: inline ALU operations.
+  - F3: a literal pool for PC values and large immediates. Helper calls no
+    longer need one (§11).
+  - F2, remaining: inline the flag-setting forms, N and Z for logic
+    operations, C and V for arithmetic.
   - F8: inline memory-map probe.
   - F11: measure -O3 and LTO.
 
@@ -462,3 +564,12 @@ Lessons from this session:
   captured. Put diagnostics on the fatal screen.
 - `cpu_threaded.c` mixes LF and CRLF lines. Line-based patching that ignores
   padding works; exact multi-line regexes did not.
+- Before `555016c`, header edits did not rebuild the objects that include
+  them. On an older checkout, run `make clean` after changing emitter headers.
+- The fixed-frame benchmark is deterministic in Flycast: the same disc gives
+  the same millisecond count.
+- In this environment, commands run through the shell tool can collapse
+  doubled backslashes and break long heredocs. Write C strings that contain
+  escapes, and long text, with a file editor.
+- `cmd` here does not run executables from the current directory. Give batch
+  files absolute paths.
