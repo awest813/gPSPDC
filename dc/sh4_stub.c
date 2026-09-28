@@ -99,9 +99,20 @@ static inline void extract_flags_local(void)
    overflows mid-game. */
 static u32 sh4_dispatch_stack;
 
+#ifdef GPSP_SH4_TEST_DISPATCH_HOOK
+/* Host-test hook: the qemu-sh4 harness checks that the code about to run
+   was written back and invalidated (tests/sh4_exec).  Never defined in
+   Dreamcast builds. */
+void GPSP_SH4_TEST_DISPATCH_HOOK(const u8 *target);
+#endif
+
 static void __attribute__((noreturn, noinline))
  sh4_dispatch_block(u8 *target, u32 cycles)
 {
+#ifdef GPSP_SH4_TEST_DISPATCH_HOOK
+  GPSP_SH4_TEST_DISPATCH_HOOK(target);
+#endif
+
   /* Pin the operands to caller-saved low registers: the asm overwrites
      r12/r13/r15, so the register allocator must never hand an input one of
      those registers (it has no way to know they die mid-template). */
@@ -370,13 +381,65 @@ void sh4_invalidate_icache_region(u32 addr, u32 size)
   icache_flush_range(addr, size);
 }
 
+/* Code below each mark has been written back and invalidated.  A top-level
+   translation can emit into more than one cache: linking a SWI exit, for
+   example, translates the BIOS vector recursively into the BIOS cache while
+   a ROM or RAM block is being built.  Flushing only the top-level cache
+   left that BIOS code unflushed when it first ran.  Flush exactly the new
+   code in every cache instead, which also avoids re-flushing the whole
+   used cache after every block. */
+static u8 *sh4_flushed_rom = rom_translation_cache;
+static u8 *sh4_flushed_ram = ram_translation_cache;
+static u8 *sh4_flushed_bios = bios_translation_cache;
+
+static void sh4_flush_new_code(u8 **flushed, u8 *cache, u8 *ptr)
+{
+  if(ptr < *flushed)
+    *flushed = cache;
+
+  if(ptr > *flushed)
+  {
+    sh4_invalidate_icache_region((u32)*flushed, (u32)(ptr - *flushed));
+    *flushed = ptr;
+  }
+}
+
+void sh4_flush_new_translations(void)
+{
+  sh4_flush_new_code(&sh4_flushed_rom, rom_translation_cache,
+   rom_translation_ptr);
+  sh4_flush_new_code(&sh4_flushed_ram, ram_translation_cache,
+   ram_translation_ptr);
+  sh4_flush_new_code(&sh4_flushed_bios, bios_translation_cache,
+   bios_translation_ptr);
+}
+
+/* Called when a translation cache is reset: its new code starts over at the
+   base and must all be flushed again before it runs. */
+void sh4_translation_cache_reset(u8 *cache, u32 used)
+{
+  sh4_invalidate_icache_region((u32)cache, used + 0x100);
+
+  if(cache == rom_translation_cache)
+    sh4_flushed_rom = cache;
+  else if(cache == ram_translation_cache)
+    sh4_flushed_ram = cache;
+  else if(cache == bios_translation_cache)
+    sh4_flushed_bios = cache;
+}
+
 u32 function_cc execute_arm_translate(u32 cycles)
 {
   u8 *target;
   u32 pc = reg[REG_PC];
 
   extract_flags_local();
-  target = block_lookup_address_arm(pc);
+  /* Enter in the current instruction set: a Thumb-mode savestate loaded
+     before the dynarec first runs must not be translated as ARM. */
+  if(reg[REG_CPSR] & 0x20)
+    target = block_lookup_address_thumb(pc);
+  else
+    target = block_lookup_address_arm(pc);
 
 #if defined(_arch_dreamcast) && defined(GPSP_DC_RUNTIME_TRACE)
   printf("[gbaDC trace] execute dynarec enter pc=%08x target=%p cycles=%u cpsr=%08x\n",

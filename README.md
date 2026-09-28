@@ -110,6 +110,12 @@ Requires a host C compiler, Make, and Python 3. The suite includes save/config f
 make -C tests test
 ```
 
+To execute the SH-4 dynarec's real output under qemu, compared against the interpreter and checked for instruction-cache coherence, install `gcc-sh4-linux-gnu` and `qemu-user` and run:
+
+```sh
+make -C tests sh4-exec
+```
+
 ## Large ROMs on stock Dreamcast
 
 Commercial GBA titles can be up to 32 MB. gPSPDC loads them from GD-ROM under `/cd/gbaDC/` using **32 KB demand paging** when the ROM is larger than the resident buffer.

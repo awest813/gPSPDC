@@ -115,6 +115,12 @@ each patch site in the `generate_branch_patch_*` family.
 This finding is not in the existing roadmap and is the cheapest large win
 available.
 
+**Update, 28 September 2026:** done. `sh4_flush_new_translations()` flushes
+only the code emitted since the last flush, in every cache, which also fixed
+recursive BIOS translations never being flushed. See
+[DYNAREC_AUDIT_2026-09-28.md](DYNAREC_AUDIT_2026-09-28.md). No frame-rate
+effect has been measured yet.
+
 ### F2 — Every data-processing instruction is an out-of-line C call
 
 `arm_data_proc`, `arm_data_proc_test`, `arm_data_proc_unary`,

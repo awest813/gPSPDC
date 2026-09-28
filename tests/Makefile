@@ -2,7 +2,12 @@ CC ?= gcc
 PYTHON ?= python3
 CFLAGS ?= -Wall -Wextra -std=c99
 
-.PHONY: test clean
+.PHONY: test clean sh4-exec
+
+# Executes the production SH-4 dynarec under qemu-sh4 against the
+# interpreter.  Needs gcc-sh4-linux-gnu and qemu-user; see sh4_exec/.
+sh4-exec:
+	$(MAKE) -C sh4_exec test
 
 test: sh4_helpers_behavior_test phase1_helpers_test sh4_emit_encoding_test sh4_integration_contract_test \
 	phase2_ldm_stm_test phase3_memory_test phase4_cheats_test \
@@ -67,6 +72,7 @@ clean:
 		phase6_release_verification_test dc_build_contract_test \
 		phase8_dreamcast_polish_test phase9_stability_test \
 		phase10_external_validation_test
+	$(MAKE) -C sh4_exec clean
 
 sh4_helpers_behavior_test: sh4_helpers_behavior_test.c ../dc/sh4_helpers.c ../cpu.h ../cpu_mode.h shims/kos.h
 	$(CC) $(CFLAGS) -Ishims -I.. -o $@ $<
