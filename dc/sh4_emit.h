@@ -7,6 +7,8 @@
 typedef u16 *translation_ptr_t;
 extern translation_ptr_t translation_ptr;
 void sh4_invalidate_icache_region(u32 addr, u32 size);
+void sh4_flush_new_translations(void);
+void sh4_translation_cache_reset(u8 *cache, u32 used);
 
 typedef enum {
   sh4_reg_r0 = 0, sh4_reg_r1 = 1, sh4_reg_r2 = 2, sh4_reg_r3 = 3,
@@ -692,11 +694,11 @@ void gpsp_dynarec_fatal_error(const char *detail);
 
 #define generate_block_extra_vars_thumb() \
 
+/* Called once per top-level translation.  Recursive translations may have
+   emitted into other caches too, so flush the new code of every cache
+   rather than the named range (see sh4_flush_new_translations). */
 #define translate_invalidate_dcache_region(cache_start, cache_end) \
-  do { \
-    sh4_invalidate_icache_region((u32)(cache_start), \
-     (u32)((u8 *)(cache_end) - (u8 *)(cache_start)) + 0x100); \
-  } while(0)
+  sh4_flush_new_translations()
 
 /* generate_load_reg_pc, generate_store_reg_pc_*, the generate_condition_*
    family, generate_conditional_branch_type, arm_conditional_block_header,

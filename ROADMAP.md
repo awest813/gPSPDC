@@ -38,6 +38,7 @@ needs a failing test to justify divergence.
 
 | # | Item | Status | Notes |
 |---|------|--------|-------|
+| B0 | Bring the interpreter's ADC/SBC/RSC carry and register-shift masking up to the audit-4 dynarec fixes | open | Found by the qemu differential fuzz ([September 28 audit](DYNAREC_AUDIT_2026-09-28.md)); fixing it lets the gating fuzz cover those instruction classes |
 | B1 | Bring interpreter and other dynarec LDM exception returns into parity | open | SH-4 restoration, PC alignment, and user-bank selection are fixed with behavioral tests; the shared FIQ bank switch is also fixed. Other block-transfer implementations remain to audit. See [September 13 audit](DYNAREC_AUDIT_2026-09-13.md) |
 | B2 | Indirect branches do not flush the pending translate-time `cycle_count` | parity | x86 reference has the same flush commented out upstream; cycles are under-billed on register-target branches. Fix in both backends at once or not at all (timing shifts can re-break games tuned around it) |
 | B3 | Thumb `BX PC` uses `pc + 4` without word alignment | parity | Hardware uses `Align(pc,4) + 4`; only differs when the BX sits at a non-word-aligned Thumb address. Same in x86 backend |
@@ -46,6 +47,8 @@ needs a failing test to justify divergence.
 | B6 | SWI does not set the I bit (IRQ disable) on entry | parity | All gpSP cores share this; BIOS handler runs with IRQs at prior state for a few instructions |
 | B7 | `SH4_ARM_MAX_EMIT_BYTES_PER_INSN` (512) is an estimate; the patch-time backstop calls `gpsp_dynarec_fatal_error` if it is ever wrong | open | If the fatal error is ever observed, measure the real worst-case emission and raise the bound (or always use the far skip) |
 | B8 | `SH4_EMIT_LOAD_IMM` materializes 32-bit constants in up to 14 instructions | open | Perf, not correctness: a PC-relative literal pool would shrink hot blocks substantially (every helper call embeds a function address). Largest remaining dynarec speed lever |
+| B10 | `SWP` loses its `Rd` write when the store raises an alert (SMC/IRQ/halt) | open | Same in the interpreter; write `Rd` before the store call |
+| B11 | `sh4_invalidate_icache_region` calls `dcache_flush_range` before `icache_flush_range`, which already writes back the operand cache in KOS | open | Perf only; confirm against the KOS 2.0 source before dropping it |
 | B9 | Block-level register allocation (gpSP "memory form" only on SH-4) | open | Every ARM register access is a load/store through r12. Big perf project; only attempt after A-track baselining shows it is needed |
 
 ## Track C — Test infrastructure
@@ -54,7 +57,7 @@ needs a failing test to justify divergence.
 |---|------|--------|-------|
 | C1 | Build `jsmolka/gba-tests` ROMs and run ARM/Thumb/memory/BIOS suites in Flycast; log in `scripts/smoke-test-results.md` | open | Repos already pinned in `EXTERNAL_VALIDATION_LOCK.md`; needs FASMARM locally |
 | C2 | Host single-step harness around `SingleStepTests/ARM7TDMI` JSON: seed CPU state, step interpreter, compare | open | Phase 10 P0. Interpreter first (host-buildable); SH-4 dynarec comparison needs an SH-4 emulator or on-target runner — keep that part aspirational |
-| C3 | Extend the emitted-code simulator beyond immediate loads and conditional skips | open | LOAD_IMM round trips and near/literal-veneer skip polarity now execute in host tests; expand toward memory and helper-call sequences |
+| C3 | Execute real translated blocks | partial | `make -C tests sh4-exec` runs the production translator under qemu-sh4 against the interpreter, with a cache-coherence model ([September 28 audit](DYNAREC_AUDIT_2026-09-28.md)). Fuzz covers ARM data processing/multiply/PSR/branches and Thumb formats 1–5; extend to loads/stores, LDM/STM, SWI and IRQ timing |
 | C4 | Extend host-compiled SH-4 helper tests to block-store alerts and real memory/IRQ side effects | open | Arithmetic, shifts, CPSR, mapped LDM/STM, exception returns, and production bank switching now have executable coverage; see [September 13 audit](DYNAREC_AUDIT_2026-09-13.md) |
 | C5 | CI: cache the KOS Docker image pull (currently re-pulled every run) | open | `einsteinx2/dcdev-kos-toolchain:gcc-9__v2.0.0` |
 

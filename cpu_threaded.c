@@ -2888,6 +2888,11 @@ u8 function_cc *block_lookup_address_##type(u32 pc)                           \
         s32 translation_result;                                               \
                                                                               \
         redo:                                                                 \
+        /* A cache flush during a failed attempt cleared the hash, leaving    \
+           block_ptr_address inside the discarded cache.  Relink from the     \
+           bucket so the retried block is found by later lookups. */         \
+        if(rom_branch_hash[hash_target] == NULL)                              \
+          block_ptr_address = rom_branch_hash + hash_target;                  \
                                                                               \
         translation_recursion_level++;                                        \
         ((u32 *)rom_translation_ptr)[0] = pc;                                 \
@@ -3501,8 +3506,8 @@ void flush_translation_cache_ram()
   invalidate_icache_region(ram_translation_cache,
    (ram_translation_ptr - ram_translation_cache) + 0x100);
 #elif defined(_arch_dreamcast)
-sh4_invalidate_icache_region((u32)ram_translation_cache,
-  (ram_translation_ptr - ram_translation_cache) + 0x100);
+  sh4_translation_cache_reset(ram_translation_cache,
+   ram_translation_ptr - ram_translation_cache);
 #endif
   ram_translation_ptr = ram_translation_cache;
   ram_block_tag_top = 0x0101;
@@ -3567,8 +3572,8 @@ void flush_translation_cache_rom()
   invalidate_icache_region(rom_translation_cache,
    rom_translation_ptr - rom_translation_cache + 0x100);
 #elif defined(_arch_dreamcast)
-sh4_invalidate_icache_region((u32)rom_translation_cache,
-rom_translation_ptr - rom_translation_cache + 0x100);
+  sh4_translation_cache_reset(rom_translation_cache,
+   rom_translation_ptr - rom_translation_cache);
 #endif
   rom_translation_ptr = rom_translation_cache;
   memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
@@ -3580,12 +3585,17 @@ void flush_translation_cache_bios()
   invalidate_icache_region(bios_translation_cache,
    bios_translation_ptr - bios_translation_cache + 0x100);
 #elif defined(_arch_dreamcast)
-   sh4_invalidate_icache_region((u32)bios_translation_cache,
-   bios_translation_ptr - bios_translation_cache + 0x100);
+  sh4_translation_cache_reset(bios_translation_cache,
+   bios_translation_ptr - bios_translation_cache);
 #endif
   bios_block_tag_top = 0x0101;
   bios_translation_ptr = bios_translation_cache;
   memset(bios_rom + 0x4000, 0, 0x4000);
+
+  /* ROM and RAM blocks link SWI exits directly to BIOS translations.  Drop
+     them too, or they would jump into reused BIOS cache space. */
+  flush_translation_cache_rom();
+  flush_translation_cache_ram();
 }
 
 void dump_translation_cache()

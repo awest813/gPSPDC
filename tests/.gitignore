@@ -6,3 +6,4 @@ phase5_user_readiness_test
 phase6_release_verification_test
 dc_build_contract_test
 phase8_dreamcast_polish_test
+sh4_exec/sh4_exec_test

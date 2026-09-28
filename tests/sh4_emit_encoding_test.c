@@ -38,6 +38,13 @@ void sh4_invalidate_icache_region(u32 addr, u32 size)
   invalidate_count++;
 }
 
+static u32 flush_new_translations_count;
+
+void sh4_flush_new_translations(void)
+{
+  flush_new_translations_count++;
+}
+
 static u32 fatal_error_count;
 static const char *fatal_error_detail;
 
@@ -564,31 +571,25 @@ static void test_long_branch_filler_patch(void)
   }
 }
 
+/* The per-translation hook flushes the new code of every translation cache
+   (recursive translations can emit into caches other than the top-level
+   one), so it must delegate instead of flushing the named range.  The
+   qemu-sh4 harness in tests/sh4_exec checks the resulting coherence. */
 static void test_icache_range_hook(void)
 {
   u8 cache[64];
   u8 *cache_end = cache + 28;
-  u32 expected_addr = (u32)(uintptr_t)cache;
-  u32 expected_size = 28 + 0x100;
 
   invalidate_count = 0;
-  last_invalidate_addr = 0;
-  last_invalidate_size = 0;
+  flush_new_translations_count = 0;
 
-#ifdef __GNUC__
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpointer-to-int-cast"
-#endif
   translate_invalidate_dcache_region(cache, cache_end);
-#ifdef __GNUC__
-#pragma GCC diagnostic pop
-#endif
+  (void)cache_end;
 
-  if(invalidate_count != 1 || last_invalidate_addr != expected_addr ||
-   last_invalidate_size != expected_size)
+  if(flush_new_translations_count != 1 || invalidate_count != 0)
   {
-    printf("icache range hook failed: count=%u addr=%08x size=%u\n",
-     invalidate_count, last_invalidate_addr, last_invalidate_size);
+    printf("icache range hook failed: delegated=%u direct=%u\n",
+     flush_new_translations_count, invalidate_count);
     failures++;
   }
   else
